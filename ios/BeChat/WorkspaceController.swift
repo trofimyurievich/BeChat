@@ -78,10 +78,12 @@ final class WorkspaceController: UIViewController, WKNavigationDelegate, WKScrip
         default: break
         }
     }
-    private func status(_ message:String) {web.callAsyncJavaScript("window.beChatNativeStatus(message)",arguments:["message":message],in:nil,contentWorld:.page,completionHandler:{_ in})}
+    private func status(_ message: String) {
+        web.callAsyncJavaScript("window.beChatNativeStatus(message)", arguments: ["message": message], in: nil, in: .page) { _ in }
+    }
     private func supply(_ value:String,at origin:URL){
         guard server==origin,let page=web.url,ServerAddress.sameOrigin(page,origin) else{return}
-        web.callAsyncJavaScript("return await window.beChatNativeSession(token)", arguments:["token":value],in:nil,contentWorld:.page){[weak self] outcome in
+        web.callAsyncJavaScript("return await window.beChatNativeSession(token)", arguments: ["token": value], in: nil, in: .page) { [weak self] outcome in
             guard let self,self.server==origin else{return}
             if case .success(let result)=outcome,let ok=result as? Bool,ok{self.currentToken=value;SessionVault.save(value,for:origin)}
             else{self.currentToken=nil;SessionVault.clear(origin)}
