@@ -1,0 +1,22 @@
+name: BeChat iPhone Release
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  iphone:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build arm64 for iPhone
+        run: bash ios/build.sh "$RUNNER_TEMP/iphone"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BeChat-iphone
+          path: |
+            ${{ runner.temp }}/iphone/BeChat.ipa
+            ${{ runner.temp }}/iphone/ios-sha256.txt
+            ${{ runner.temp }}/iphone/macho-platform.txt
+          if-no-files-found: error
+

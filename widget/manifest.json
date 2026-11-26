@@ -1,0 +1,30 @@
+{
+  "widget": {
+    "name": "widget.name",
+    "description": "widget.description",
+    "short_description": "widget.short_description",
+    "version": "1.1.0",
+    "interface_version": 2,
+    "init_once": false,
+    "locale": [
+      "ru"
+    ],
+    "installation": true
+  },
+  "locations": [
+    "lcard-1",
+    "ccard-1",
+    "settings",
+    "advanced_settings"
+  ],
+  "settings": {
+    "service_url": {
+      "name": "settings.service_url",
+      "type": "text",
+      "required": true
+    }
+  },
+  "advanced": {
+    "title": "advanced.title"
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "widget": {
+    "name": "BeChat",
+    "description": "Переписка с клиентами в карточках контактов и сделок amoCRM. Продукт BeQuick.",
+    "short_description": "Диалоги BeChat от BeQuick"
+  },
+  "settings": {
+    "service_url": "HTTPS-адрес вашего сервера BeChat"
+  },
+  "advanced": {
+    "title": "Переписка BeChat"
+  }
+}

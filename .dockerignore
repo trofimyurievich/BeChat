@@ -1,0 +1,10 @@
+**
+!package.json
+!server/
+!server/**
+server/user.mjs
+!dist/
+!dist/**
+dist/assets/portrait-*
+dist/assets/orbit.*
+

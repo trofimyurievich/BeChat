@@ -1,0 +1,39 @@
+name: bechat
+services:
+  app:
+    build: .
+    env_file: .env
+    environment:
+      HOST: 0.0.0.0
+      PORT: 3010
+      BECHAT_DB: /app/data/bechat.sqlite
+    restart: unless-stopped
+    init: true
+    ports:
+      - "127.0.0.1:3010:3010"
+    volumes:
+      - bechat-data:/app/data
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3010/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+  proxy:
+    image: caddy:2-alpine
+    profiles: ["edge"]
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - bechat-tls:/data
+      - bechat-proxy:/config
+volumes:
+  bechat-data:
+  bechat-tls:
+  bechat-proxy:
+

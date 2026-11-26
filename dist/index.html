@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover"
+    />
+    <meta name="theme-color" content="#03051c" />
+    <title>BeChat — сообщения</title>
+    <link rel="stylesheet" href="app.css" />
+    <link rel="stylesheet" href="message-menu.css" />
+    <link rel="stylesheet" href="theme.css" />
+    <link rel="stylesheet" href="preview.css" />
+    <script src="theme.js"></script>
+    <link rel="icon" href="mark.svg" />
+  </head>
+  <body>
+    <svg id="symbols" aria-hidden="true"></svg>
+    <header class="top">
+      <div class="wordmark">
+        <img
+          id="brand-sphere"
+          src="assets/sphere-still.webp"
+          alt=""
+          width="35"
+          height="35"
+        /><span class="brand-stage"
+          ><span class="brand-type"
+            ><strong>BeChat</strong
+            ><span class="brandby">by BeQuick</span></span
+          ></span
+        >
+      </div>
+      <div class="crumb">
+        Рабочее пространство <i>/</i> <b id="crumb">Входящие</b>
+      </div>
+    </header>
+    <div class="shell">
+      <nav class="rail" aria-label="Разделы">
+        <div id="railmain"></div>
+        <div class="railbottom">
+          <button
+            class="navbtn"
+            data-act="settings"
+            title="Настройки"
+            aria-label="Настройки"
+          >
+            <svg><use href="#i-settings" /></svg></button
+          ><button
+            class="operator"
+            data-act="settings"
+            title="Профиль"
+            aria-label="Профиль"
+          >
+            <svg aria-hidden="true"><use href="#i-user"/></svg>
+          </button>
+        </div>
+      </nav>
+      <aside class="inbox">
+        <div class="listhead">
+          <div class="heading">
+            <h1 id="listtitle">Входящие</h1>
+            <button
+              class="icon outline"
+              title="Новый диалог"
+              aria-label="Новый диалог"
+              data-act="new"
+            >
+              <svg><use href="#i-compose" /></svg>
+            </button>
+          </div>
+          <label class="search"
+            ><svg><use href="#i-search" /></svg
+            ><input
+              id="query"
+              placeholder="Найти диалог"
+              autocomplete="off"
+            /><kbd>/</kbd></label
+          >
+          <div class="tabs" id="tabs"></div>
+        </div>
+        <div id="chatlist" class="chatlist"></div>
+        <button class="channelsfoot" data-act="channels">
+          <svg><use href="#i-network" /></svg>Каналы связи<svg class="last">
+            <use href="#i-right" />
+          </svg>
+        </button>
+      </aside>
+      <main id="dialog" class="dialog">
+        <header class="chathead" id="chathead"></header>
+        <div class="thread" id="thread"></div>
+        <div id="composer"></div>
+      </main>
+      <aside id="details" class="details"></aside>
+    </div>
+    <dialog id="modal">
+      <header>
+        <h2 id="modaltitle"></h2>
+        <button class="icon" aria-label="Закрыть" data-act="close">
+          <svg><use href="#i-close" /></svg>
+        </button>
+      </header>
+      <section id="modalbody"></section>
+    </dialog>
+    <dialog id="file-preview" aria-labelledby="viewer-title">
+      <header>
+        <span class="viewer-type" aria-hidden="true"></span>
+        <h2 id="viewer-title"></h2>
+        <button id="viewer-download" type="button" aria-label="Скачать файл">
+          <svg aria-hidden="true"><use href="#i-download" /></svg
+          ><span>Скачать</span>
+        </button>
+        <button
+          id="viewer-close"
+          type="button"
+          class="icon"
+          aria-label="Закрыть предпросмотр"
+        >
+          <svg aria-hidden="true"><use href="#i-close" /></svg>
+        </button>
+      </header>
+      <div class="viewer-body">
+        <div id="viewer-scroll" tabindex="0" aria-label="Страницы документа">
+          <div id="viewer-content"></div>
+        </div>
+        <div id="viewer-status">
+          <p aria-live="polite"></p>
+          <form id="viewer-password" hidden>
+            <input
+              type="password"
+              name="password"
+              aria-label="Пароль PDF"
+              required
+            /><button class="primary" type="submit">Открыть</button>
+          </form>
+        </div>
+      </div>
+      <footer aria-label="Управление просмотром">
+        <button
+          class="icon"
+          data-view="prev"
+          title="Предыдущая страница"
+          aria-label="Предыдущая страница"
+        >
+          <svg><use href="#i-back" /></svg>
+        </button>
+        <input
+          id="viewer-page"
+          type="number"
+          min="1"
+          aria-label="Номер страницы"
+        /><span id="viewer-total"></span>
+        <button
+          class="icon"
+          data-view="next"
+          title="Следующая страница"
+          aria-label="Следующая страница"
+        >
+          <svg><use href="#i-right" /></svg>
+        </button>
+        <span class="viewer-division" aria-hidden="true"></span
+        ><button class="icon" data-view="minus" aria-label="Уменьшить">−</button
+        ><span id="viewer-scale"></span
+        ><button class="icon" data-view="plus" aria-label="Увеличить">+</button
+        ><button id="viewer-fit" data-view="fit">По ширине</button>
+      </footer>
+    </dialog>
+    <div id="toast" role="status" aria-live="polite"></div>
+    <input type="file" id="fileinput" hidden />
+    <script src="icons.js"></script>
+    <script src="config.js"></script>
+    <script src="data.js"></script>
+    <script src="channel-picker.js"></script>
+    <script src="sms-core.js"></script>
+    <script src="accounts-ui.js"></script>
+    <script src="sms-ui.js"></script>
+    <script src="document-preview.js"></script>
+    <script src="identity.js"></script>
+    <script src="app.js"></script>
+    <script src="message-menu.js"></script>
+  </body>
+</html>

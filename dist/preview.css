@@ -1,0 +1,249 @@
+#file-preview {
+  width: min(1024px, calc(100vw - 52px));
+  max-width: none;
+  height: min(88dvh, 980px);
+  max-height: none;
+  padding: 0;
+  color: var(--ink);
+  background: var(--surface);
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 17px;
+}
+#file-preview[open] {
+  display: flex;
+  flex-direction: column;
+  animation: viewer-in 0.18s ease-out;
+}
+#file-preview::backdrop {
+  background: #03051c95;
+  backdrop-filter: blur(5px);
+}
+#file-preview > header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 20px;
+  margin: 0;
+  border-bottom: 1px solid var(--line);
+}
+.viewer-type {
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  font-weight: 700;
+  background: var(--button);
+  color: var(--ink);
+  border-radius: 6px;
+  padding: 8px 6px;
+}
+#viewer-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: clamp(14px, 2vw, 17px);
+  margin: 0;
+}
+#viewer-download {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  color: var(--accent);
+  border-radius: 6px;
+  padding: 6px;
+}
+#viewer-download svg {
+  width: 17px;
+  height: 17px;
+}
+.viewer-body {
+  flex: 1;
+  position: relative;
+  min-height: 0;
+  background: var(--shade);
+}
+#viewer-scroll {
+  width: 100%;
+  height: 100%;
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+#viewer-content {
+  box-sizing: border-box;
+  min-height: 100%;
+  position: relative;
+}
+#viewer-content.pdf-pages {
+  display: flex;
+  align-items: center;
+  flex-direction: column;
+  gap: 13px;
+  padding: 16px 0;
+}
+.pdf-sheet {
+  margin: 0;
+  flex: none;
+  position: relative;
+  overflow: hidden;
+  background: #fff;
+  box-shadow: 0 2px 7px #03051c30;
+}
+.pdf-sheet canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+.viewer-docx {
+  display: block;
+  border: none;
+  width: 100%;
+  height: 100%;
+  background: transparent;
+}
+#viewer-status {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 12px;
+  text-align: center;
+  padding: 20px;
+  background: var(--shade);
+  color: var(--ink);
+}
+#viewer-status[hidden],
+#viewer-password[hidden] {
+  display: none;
+}
+#viewer-password {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+#viewer-password input {
+  padding: 8px;
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--ink);
+  border: 1px solid var(--line);
+}
+#file-preview footer {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 6px;
+  min-height: 52px;
+  padding: 6px 10px;
+  border-top: 1px solid var(--line);
+}
+#file-preview footer .icon[disabled] {
+  opacity: 0.4;
+  cursor: default;
+}
+#viewer-page {
+  appearance: textfield;
+  -moz-appearance: textfield;
+  color: var(--ink);
+  background: var(--shade);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 4px;
+  width: 3.6em;
+  text-align: center;
+  font: inherit;
+  font-size: 13px;
+}
+#viewer-page::-webkit-inner-spin-button {
+  appearance: none;
+}
+.viewer-division {
+  height: 21px;
+  width: 1px;
+  background: var(--line);
+  margin: 0 7px;
+}
+#viewer-fit {
+  color: var(--accent);
+  padding: 5px 8px;
+  border-radius: 6px;
+  font-size: 13px;
+}
+#viewer-total,
+#viewer-scale {
+  font-size: 13px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+#viewer-scale {
+  min-width: 3em;
+  text-align: center;
+}
+#file-preview [data-view="minus"],
+#file-preview [data-view="plus"] {
+  font-size: 20px;
+}
+@keyframes viewer-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@media (max-width: 640px) {
+  #file-preview {
+    width: 100vw;
+    height: 100dvh;
+    border: 0;
+    border-radius: 0;
+  }
+  #file-preview > header {
+    padding: 10px 12px;
+    gap: 8px;
+  }
+  #viewer-download span {
+    display: none;
+  }
+  #file-preview footer {
+    gap: 2px;
+    padding-bottom: max(7px, env(safe-area-inset-bottom));
+  }
+  .viewer-division {
+    margin: 0 3px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  #file-preview[open] {
+    animation: none;
+  }
+}
+
+.cover-button {
+  display: block;
+  padding: 0;
+}
+.attachment-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.attachment-row .filecard {
+  flex: 1;
+  min-width: 0;
+  width: auto;
+}
+.attachment-row .filecard span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.file-download {
+  flex: none;
+  color: var(--accent);
+}

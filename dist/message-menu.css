@@ -1,0 +1,192 @@
+#message-menu {
+  position: fixed;
+  z-index: 15;
+  width: min(278px, calc(100vw - 12px));
+  max-height: calc(100dvh - 12px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  outline: none;
+  color: var(--ink);
+  isolation: isolate;
+  filter: drop-shadow(0 8px 17px #03051c88);
+}
+#message-menu[hidden] {
+  display: none;
+}
+.reaction-tray,
+.message-menu-sheet {
+  border: 1px solid color-mix(in srgb, var(--accent) 22%, var(--base));
+  background: var(--surface);
+}
+.reaction-tray {
+  padding: 4px 5px;
+  display: grid;
+  grid-template-columns: repeat(8, minmax(0, 1fr));
+  align-items: center;
+  border-radius: 22px;
+  width: 100%;
+  position: relative;
+}
+.reaction-tray button {
+  display: grid;
+  place-items: center;
+  min-width: 0;
+  height: 30px;
+  padding: 0;
+  border-radius: 50%;
+  font:
+    19px/1 "Segoe UI Emoji",
+    sans-serif;
+}
+.reaction-tray button:is(:hover, :focus-visible),
+.reaction-tray button[aria-pressed="true"] {
+  background: var(--button);
+}
+.reaction-tray .more-reactions {
+  height: 22px;
+  width: 22px;
+  justify-self: center;
+  background: var(--shade);
+  color: var(--accent);
+}
+.more-reactions svg {
+  width: 14px;
+  height: 14px;
+}
+.more-reactions[aria-expanded="true"] svg {
+  transform: rotate(180deg);
+}
+.reaction-extra {
+  grid-column: 1/-1;
+  display: grid;
+  grid-template-columns: repeat(8, 1fr);
+  padding-top: 5px;
+  margin-top: 4px;
+  border-top: 1px solid var(--line);
+}
+.message-menu-sheet {
+  width: min(214px, 100%);
+  margin: 5px 0 0 min(19px, 4vw);
+  border-radius: 10px;
+  padding: 5px 4px 3px;
+}
+.message-menu-sheet button {
+  display: flex;
+  align-items: center;
+  gap: 15px;
+  width: 100%;
+  height: 34px;
+  padding: 0 11px;
+  font-size: 13.5px;
+  text-align: left;
+  border-radius: 6px;
+}
+.message-menu-sheet button > svg,
+.message-menu-time > svg {
+  width: 17px;
+  height: 17px;
+  stroke-width: 1.5;
+  color: var(--accent);
+}
+.message-menu-sheet button:focus:not(:focus-visible) {
+  outline: none;
+}
+.message-menu-sheet button:is(:hover, :focus-visible):enabled {
+  background: var(--shade);
+  color: var(--ink);
+}
+.message-menu-time {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 9px 10px 5px;
+  border-top: 1px solid var(--line);
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.message-menu-time svg {
+  width: 14px;
+  height: 14px;
+}
+.bubble.context-active,
+.msg-selected .bubble {
+  box-shadow:
+    0 0 0 1px var(--accent),
+    0 0 0 4px #a5b7ff12;
+}
+.message-reaction {
+  display: flex;
+  align-items: center;
+  width: max-content;
+  min-height: 22px;
+  border: 1px solid var(--line);
+  background: var(--button);
+  border-radius: 14px;
+  margin-top: 5px;
+  padding: 1px 7px;
+  font:
+    15px "Segoe UI Emoji",
+    sans-serif;
+}
+.selection-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 14px;
+  background: var(--shade);
+  border-bottom: 1px solid var(--line);
+  font-size: 13px;
+}
+.selection-bar b {
+  margin-right: auto;
+}
+.selection-bar button {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  color: var(--accent);
+}
+.selection-bar svg {
+  width: 16px;
+  height: 16px;
+}
+.message-confirm {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 18px;
+}
+@media (prefers-reduced-motion: no-preference) {
+  body:not(.no-motion) #message-menu:not([hidden]) {
+    animation: messageMenuIn 0.14s ease-out;
+    transform-origin: top left;
+  }
+  @keyframes messageMenuIn {
+    from {
+      opacity: 0;
+      transform: translateY(3px) scale(0.98);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+}
+.burning-heart {
+  display: inline-grid;
+  position: relative;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+}
+.burning-heart::after {
+  content: "❤️";
+  position: absolute;
+  bottom: 1px;
+  left: 5px;
+  font-size: 13px;
+  line-height: 1;
+}

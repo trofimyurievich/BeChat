@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; img-src blob: data:; font-src blob: data:; form-action 'none'; base-uri 'none'; frame-src 'none'"
+    />
+    <title>Страницы DOCX</title>
+    <style>
+      * {
+        box-sizing: border-box;
+      }
+      html {
+        height: 100%;
+        scrollbar-gutter: stable;
+      }
+      body {
+        margin: 0;
+        min-height: 100%;
+        font-family: Arial, sans-serif;
+      }
+      #stage {
+        padding: 16px 0;
+      }
+      #paper {
+        margin: auto;
+        width: max-content;
+      }
+      #paper .docx-wrapper {
+        background: transparent;
+        padding: 0;
+        gap: 13px;
+      }
+      #paper .docx-wrapper > section {
+        color: #171822;
+        background-color: white;
+        margin: 0;
+        box-shadow: 0 2px 7px #03051c30;
+      }
+      #paper a {
+        pointer-events: none;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="stage"><main id="paper"></main></div>
+    <script src="assets/zip-reader.js"></script>
+    <script src="assets/docx-reader.js"></script>
+    <script src="docx-frame.js"></script>
+  </body>
+</html>
