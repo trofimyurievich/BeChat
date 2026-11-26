@@ -63,3 +63,5 @@ a.filecard,a.file-download,#viewer-download {color:inherit;text-decoration:none;
 
 .voice-player .voice-play,.voice-player .voice-play:hover {color:var(--base)}
 .voice-player .voice-play svg {fill:currentColor;stroke:none}
+
+.poll-result{background:var(--shade);border:1px solid var(--line);border-radius:14px;padding:16px;margin:12px 0}.poll-result h3{margin:0 0 4px;overflow-wrap:anywhere}.poll-result small{color:var(--muted)}.poll-option{margin-top:12px}.poll-option>div{display:flex;align-items:baseline;justify-content:space-between;gap:12px}.poll-option span{overflow-wrap:anywhere}.poll-option b{font-size:12px;white-space:nowrap}.poll-option progress{display:block;width:100%;height:5px;margin-top:5px;accent-color:var(--accent)}

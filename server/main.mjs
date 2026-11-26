@@ -1,5 +1,5 @@
 import { crmLinks, telegramName } from "./crm-links.mjs";
-import { makeCard, cardPages } from "./cards.mjs";
+import { makeCard, cardPages, cardAnnouncement } from "./cards.mjs";
 import { searchGifs, getAnimation, normalizeVoice, voiceText } from "./media.mjs";
 import { createReadReceipts } from "./receipts.mjs";
 import { createAuth, authConfig } from "./auth.mjs";
@@ -453,7 +453,7 @@ async function sendMessage(u, row, input, amoId = "") {
         )
       : null;
   if (input.file && !file) bad(400, "Файл недоступен");
-  const card = input.card ? makeCard(input.card) : null;
+  const card = input.card ? {...makeCard(input.card),owner:u.login} : null;
   if (card && (file || row.channel==="SMS" && !isNote)) bad(400,"Этот канал не поддерживает карточки");
   if (!text && !file && !card) bad(400, "Введите текст");
   if (!isNote && file && text.length > 1000)
@@ -501,7 +501,7 @@ async function sendMessage(u, row, input, amoId = "") {
     const quoted = m.quote
       ? { ...m, text: "❝ " + m.quote + "\n\n" + m.text }
       : m;
-    const outbound=card ? {...quoted,text:quoted.text+"\n"+authSettings.origin+"/share/"+card.id} : quoted;
+    const outbound=card ? {...quoted,text:cardAnnouncement(card,quoted.text,authSettings.origin,row.channel)} : quoted;
     const remote = JSON.parse(row.meta).accountId
       ? await accounts.send(row, outbound, file)
       : await sendProvider(row, outbound, file);
@@ -677,7 +677,7 @@ async function route(req, res) {
     "Content-Security-Policy",
     `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data: https://upload.wikimedia.org https://fonts.gstatic.com; media-src 'self' blob:; connect-src 'self'; frame-ancestors 'self' ${crmOrigin || ""}; object-src 'none'; base-uri 'none'; form-action 'self'`,
   );
-  if (path.startsWith("/share/")) return serveCard(req,res,url);
+  if (path.startsWith("/share/")) return cards.serve(req,res,url);
   if (path === "/docx-frame.html")
     res.setHeader(
       "Content-Security-Policy",
@@ -794,6 +794,7 @@ async function route(req, res) {
       });
       return json(res,result);
     }
+    if (path === "/api/my-polls" && method==="GET") return json(res,{polls:cards.results(u)});
     if (path === "/api/library" && method === "GET") return json(res,await searchGifs(url.searchParams));
     if (path === "/api/library/file" && method === "GET") {
       const bytes=await getAnimation(url.searchParams);
@@ -1230,7 +1231,7 @@ async function route(req, res) {
   });
   res.end(method === "HEAD" ? undefined : data);
 }
-const serveCard=cardPages(db,{origin:authSettings.origin,readBody,notify:signal,canWrite:requireWrite,
+const cards=cardPages(db,{origin:authSettings.origin,secret:authSettings.clientSecret,readBody,notify:signal,canWrite:requireWrite,
   privateUser:(id,url,chat)=>{const u=auth.fileUser("card-"+id,url.searchParams.get("access"));visibleChat(chat,u);return u;}});
 createServer((req, res) =>
   route(req, res).catch((e) => {

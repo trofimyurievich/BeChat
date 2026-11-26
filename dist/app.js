@@ -612,6 +612,7 @@ async function handle(act) {
     );
     return;
   }
+  if (act === "my-polls") return showMyPolls();
   if (act === "settings") {
     const commonSender = state.sharedSms?.sender;
     modal(
@@ -623,6 +624,7 @@ async function handle(act) {
           "Telegram, WhatsApp, MAX и ВКонтакте",
           "network",
         ) +
+        actionRow("my-polls","Мои опросы","Ответы и результаты за последние три дня","poll") +
         (isFounder()
           ? modalBtn(
               "sms-settings",
@@ -1203,3 +1205,22 @@ window.addEventListener("message",event=>{
       event.data?.type!=="bechat:panel:settings" || !token || !profile.crmUserId) return;
   guarded(()=>handle("settings"));
 });
+
+let pollRefreshTimer;
+async function showMyPolls(){
+  clearTimeout(pollRefreshTimer);
+  modal("Мои опросы",'<p class="formhint" role="status">Загружаем результаты…</p>',"my-polls");
+  async function update(){
+    try{
+      const {polls}=await api("my-polls");
+      if(activeModal!=="my-polls")return;
+      const date=new Intl.DateTimeFormat("ru-RU",{dateStyle:"short",timeStyle:"short"});
+      $("#modalbody").innerHTML=polls.map(p=>'<article class="poll-result"><h3>'+esc(p.title)+'</h3><small>Голосов: '+p.total+' · до '+esc(date.format(p.until))+'</small>'+
+        p.items.map(i=>{const percent=p.total?Math.round(100*i.count/p.total):0;
+          return '<div class="poll-option"><div><span>'+esc(i.label)+'</span><b>'+i.count+' · '+percent+'%</b></div><progress value="'+percent+'" max="100"></progress></div>';}).join("")+'</article>').join("") ||
+        '<p class="formhint">Пока нет активных опросов. Чтобы создать опрос, нажмите скрепку в переписке и выберите «Опрос».</p>';
+    }catch(e){if(activeModal==="my-polls")$("#modalbody").textContent=e.message;}
+    if(activeModal==="my-polls")pollRefreshTimer=setTimeout(update,15000);
+  }
+  await update();
+}
