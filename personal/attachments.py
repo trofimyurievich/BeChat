@@ -1,5 +1,7 @@
 """Read attachments only from the messenger's own HTTPS storage."""
 import base64
+import ssl
+from pathlib import Path
 from urllib.parse import urlsplit
 from aiohttp import ClientError, ClientSession, ClientTimeout
 
@@ -23,7 +25,11 @@ async def read_document(url, name, domains):
         return None
     try:
         async with ClientSession(timeout=ClientTimeout(total=18)) as session:
-            async with session.get(url, allow_redirects=False) as response:
+            tls = True
+            if domains == MAX_DOMAINS and allowed(url, ("oneme.ru","max.ru")):
+                tls=ssl.create_default_context()
+                tls.load_verify_locations(str(Path(__file__).resolve().parents[1]/"server"/"max-root.pem"))
+            async with session.get(url, allow_redirects=False, ssl=tls) as response:
                 if response.status != 200 or (response.content_length or 0) > MAX_SIZE:
                     return None
                 data = bytearray()

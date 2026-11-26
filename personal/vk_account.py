@@ -38,50 +38,82 @@ class VK(Runtime):
         # VK ID alone does not grant personal messages. Verify the actual Messages API first.
         await self.api("messages.getConversations",count=1)
         self.ready(me["id"],(me.get("first_name","")+" "+me.get("last_name","")).strip())
-        path = self.dir/"vk-cursors.json"
-        water = json.loads(path.read_text()) if path.exists() else {}
-        initial = not path.exists()
-        while True:
+        async def save_message(key, name, m, historical):
+            doc = next((a["doc"] for a in m.get("attachments",[]) if a.get("type")=="doc" and a.get("doc")), None)
+            file = await read_document(doc.get("url"),doc.get("title"),VK_DOMAINS) if doc and (doc.get("size") or 0) <= MAX_SIZE else None
+            message(key,m["id"],name,m.get("text") or ("[Вложение ВКонтакте]" if m.get("attachments") else ""), m.get("out"),m["date"],historical,file)
+
+        async def collect():
             offset = 0
             while True:
-                res = await self.api("messages.getConversations",count=200,offset=offset,extended=1)
-                names = {p["id"]:p.get("first_name","")+" "+p.get("last_name","") for p in res.get("profiles",[])}
+                res = await self.api("messages.getConversations", count=200, offset=offset, extended=1, fields="photo_100,contacts")
+                profiles = {p["id"]:p for p in res.get("profiles",[])}
                 for entry in res["items"]:
-                    p = entry["conversation"]["peer"]
-                    if p["type"] != "user":
+                    peer = entry["conversation"]["peer"]
+                    if peer["type"] != "user":
                         continue
-                    key = str(p["id"])
-                    latest = int(entry["last_message"]["id"])
-                    if int(water.get(key,0)) >= latest:
+                    key = peer["id"]
+                    mark = entry["conversation"].get("out_read")
+                    if mark:
+                        emit("receipt", peer=str(key), basis="id", position=mark)
+                    profile = profiles.get(key,{})
+                    name = " ".join(x for x in (profile.get("first_name"),profile.get("last_name")) if x)
+                    if key not in self.profiles:
+                        photo = await read_document(profile.get("photo_100"), "avatar", VK_DOMAINS)
+                        self.profile(key,name,profile.get("mobile_phone"),base64.b64decode(photo["bytes"]) if photo else None)
+                        self.profiles.add(key)
+                    latest = entry["last_message"]["id"]
+                    prior = self.cursor(key)
+                    if prior >= latest:
                         continue
-                    if initial and not self.recent:
-                        water[key] = latest
-                        continue
-                    items, last = [],int(water.get(key,0))
-                    at = 0
-                    while True:
-                        size = 25 if initial else 200
-                        data = (await self.api("messages.getHistory",peer_id=key,count=size,offset=at))["items"]
-                        items.extend(m for m in data if m["id"] > last)
-                        if initial or len(data)<size or any(m["id"]<=last for m in data):
+                    start = latest
+                    while start > prior:
+                        items = (await self.api("messages.getHistory",peer_id=key,count=200,start_message_id=start))["items"]
+                        for m in items:
+                            if m["id"] > prior:
+                                await save_message(key,name or str(key),m,True)
+                        if len(items)<200 or min(m["id"] for m in items) <= prior:
                             break
-                        at += len(data)
-                    for m in reversed(items):
-                        doc = next((a["doc"] for a in m.get("attachments",[]) if a.get("type")=="doc" and a.get("doc")), None)
-                        file = await read_document(doc.get("url"),doc.get("title"),VK_DOMAINS) if doc and (doc.get("size") or 0) <= MAX_SIZE else None
-                        message(key,m["id"],names.get(p["id"],key),m.get("text") or ("[Вложение ВКонтакте]" if m.get("attachments") else ""),
-                                m.get("out"),m["date"],initial,file)
-                    water[key] = latest
+                        oldest = min(m["id"] for m in items)
+                        if oldest >= start:
+                            raise RuntimeError("VK pagination")
+                        start = oldest
+                    self.advance(key,latest)
                 offset += len(res["items"])
                 if not res["items"] or offset >= res.get("count",offset):
-                    break
-            tmp = path.with_suffix(".tmp")
-            tmp.write_text(json.dumps(water))
-            tmp.replace(path)
-            if initial and self.recent:
-                emit("history_complete")
-            initial = False
-            await asyncio.sleep(14)
+                    return
+
+        # Establish a live cursor before starting the historical scan.
+        conn = await self.api("messages.getLongPollServer",lp_version=3)
+        self.backfill = asyncio.create_task(self.history_task(collect))
+        while True:
+            url = str(conn["server"])
+            if not url.startswith("https://"):
+                url = "https://" + url
+            if not allowed(url, VK_DOMAINS + ("vkuser.ru","vkuser.com")):
+                raise ValueError("VK long poll endpoint")
+            try:
+                async with self.http.get(url, params={"act":"a_check","key":conn["key"],"ts":conn["ts"],"wait":20,"mode":2,"version":3},allow_redirects=False) as r:
+                    result = await r.json(content_type=None)
+            except asyncio.TimeoutError:
+                continue
+            if result.get("failed"):
+                if result.get("ts"):
+                    conn["ts"] = result["ts"]
+                else:
+                    conn = await self.api("messages.getLongPollServer",lp_version=3)
+                if self.backfill.done():
+                    self.backfill = asyncio.create_task(self.history_task(collect))
+                continue
+            for event in result.get("updates",[]):
+                if len(event) >= 3 and event[0] == 7 and 0 < event[1] < 2000000000:
+                    emit("receipt", peer=str(event[1]), basis="id", position=event[2])
+                    continue
+                if event[0] != 4 or not 0 < event[3] < 2000000000:
+                    continue
+                for m in (await self.api("messages.getById",message_ids=event[1]))["items"]:
+                    await save_message(str(event[3]),None,m,False)
+            conn["ts"] = result["ts"]
 
     async def exchange(self, **data):
         async with self.http.post("https://id.vk.com/oauth2/auth",
@@ -111,6 +143,8 @@ class VK(Runtime):
             return body["response"]
 
     async def resolve(self, peer):
+        if str(peer).startswith("+"):
+            raise ValueError("phone not shared by VK")
         user=(await self.api("users.get",user_ids=peer))[0]
         return str(user["id"])
 
@@ -118,14 +152,15 @@ class VK(Runtime):
         args={"peer_id":peer,"message":text,"random_id":secrets.randbelow(2147483646)+1}
         if file:
             from aiohttp import FormData
-            url=(await self.api("docs.getMessagesUploadServer",peer_id=peer,type="doc"))["upload_url"]
+            url=(await self.api("docs.getMessagesUploadServer",peer_id=peer,type="audio_message" if file.get("kind")=="audio" else "doc"))["upload_url"]
             if not allowed(url,VK_DOMAINS):
                 raise ValueError("unknown VK upload endpoint")
             form=FormData()
             form.add_field("file",base64.b64decode(file["bytes"],validate=True),filename=file["name"])
             async with self.http.post(url,data=form,allow_redirects=False) as res:
                 uploaded=await res.json(content_type=None)
-            doc=(await self.api("docs.save",file=uploaded["file"],title=file["name"]))["doc"]
+            saved=await self.api("docs.save",file=uploaded["file"],title=file["name"])
+            doc=saved[saved["type"]]
             args["attachment"]="doc%s_%s"%(doc["owner_id"],doc["id"])
         return str(await self.api("messages.send",**args))
 

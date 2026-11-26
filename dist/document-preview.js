@@ -87,6 +87,8 @@ async function openDocument(file, opener) {
     abort: new AbortController(),
   };
   opened = s;
+  const download=document.querySelector("#viewer-download"); download.download=file.name;
+  if(file.download) download.href=file.download; else download.removeAttribute("href");
   document.querySelector("#viewer-title").textContent = file.name;
   document.querySelector(".viewer-type").textContent = kind.toUpperCase();
   pageInput.value = "";
@@ -349,7 +351,12 @@ async function openPdf(s, bytes) {
 }
 reader.addEventListener("close", disposePreview);
 document.querySelector("#viewer-close").onclick = () => reader.close();
-document.querySelector("#viewer-download").onclick = () =>
+document.querySelector("#viewer-download").onclick = (e) => {
+  const id=opened?.file?.id;
+  const fresh=id && c()?.messages.flatMap(m=>m.files || (m.file?[m.file]:[])).find(f=>f.id===id);
+  if(fresh?.download) {e.currentTarget.href=fresh.download;return;}
+  if(e.currentTarget.hasAttribute("href")) return;
+  e.preventDefault();
   guarded(async () => {
     const s = opened;
     if (s) {
@@ -357,6 +364,7 @@ document.querySelector("#viewer-download").onclick = () =>
       if (currentPreview(s)) downloadBlob(blob, s.file.name);
     }
   });
+};
 document.querySelector("#viewer-password").onsubmit = (e) => {
   e.preventDefault();
   if (opened?.unlock) {

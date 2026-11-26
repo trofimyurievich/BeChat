@@ -35,7 +35,7 @@ if (!missing.length) {
     res.end(
       JSON.stringify({
         service: "BeChat",
-        version: "1.1.0",
+        version: "1.1.7",
         status: live ? "live" : "setup_required",
       }),
     );

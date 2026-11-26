@@ -31,7 +31,7 @@ def files(directory):
             continue
         if directory == "dist" and (path.name.startswith("portrait-") or path.name in ("orbit.pdf", "orbit.jpg")):
             continue
-        if directory == "server" and (path.suffix != ".mjs" or path.name == "user.mjs"):
+        if directory == "server" and ((path.suffix != ".mjs" and path.name != "max-root.pem") or path.name == "user.mjs"):
             continue
         yield path.relative_to(ROOT).as_posix(), path.read_bytes()
 

@@ -2,3 +2,4 @@ telethon==1.46.0
 neonize==0.12.4
 maxapi-python==2.5.0
 qrcode[pil]==8.2
+vosk==0.3.45

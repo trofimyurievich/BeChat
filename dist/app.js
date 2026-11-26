@@ -47,7 +47,8 @@ let token = "",
   activeModal = "",
   lastRender = "",
   busy = 0;
-const drafts = {},
+const modeDrafts = {}, drafts = {}, noteDrafts = {},
+  draftBag = (internal=note) => internal ? noteDrafts : drafts,
   attempts = {},
   editable = () => profile.role !== "Наблюдатель";
 try {
@@ -84,13 +85,43 @@ const select = (label, name, items, chosen) =>
 function form(action, body, label = "Сохранить") {
   return `<form data-form="${action}">${body}<button class="primary" type="submit">${label}</button></form>`;
 }
+const photos = new Map();
+const thumbnails=new Map();
+const thumbnailObserver=new IntersectionObserver(entries=>{
+  for(const entry of entries) {
+    if(!entry.isIntersecting) continue;
+    const img=entry.target, fid=img.dataset.photo;
+    thumbnailObserver.unobserve(img);
+    if (!thumbnails.has(fid)) thumbnails.set(fid,attachmentBlob({id:fid}).then(b=>URL.createObjectURL(b)).catch(()=>{thumbnails.delete(fid);return "";}));
+    thumbnails.get(fid).then(src=>{
+      if(!img.isConnected)return;
+      if(src){img.onerror=()=>img.parentElement?.classList.add("unavailable");img.src=src;}
+      else img.parentElement?.classList.add("unavailable");
+    });
+    if(thumbnails.size>100) {const key=thumbnails.keys().next().value;thumbnails.get(key).then(src=>URL.revokeObjectURL(src));thumbnails.delete(key);}
+  }
+});
+
+function paintPhotos() {
+  thumbnailObserver.disconnect();
+  for(const img of document.querySelectorAll("img[data-photo]")) thumbnailObserver.observe(img);
+  for (const node of document.querySelectorAll("img[data-avatar]")) {
+    const chat = state.chats.find(x=>x.id===node.dataset.avatar);
+    if (!chat?.avatarVersion || !token) continue;
+    const key=chat.id+":"+chat.avatarVersion;
+    if (!photos.has(key)) photos.set(key,fetch("/api/avatar/"+encodeURIComponent(chat.id),{headers:{Authorization:"Bearer "+token}})
+      .then(r=>{if(!r.ok) throw Error(); return r.blob();}).then(blob=>URL.createObjectURL(blob))
+      .catch(()=>{photos.delete(key); return "";}));
+    photos.get(key).then(src=>{if(src && node.isConnected){node.src=src;node.hidden=false;}});
+  }
+}
 function avatar(x, badge = false) {
   const chars = x.name
     .split(" ")
     .map((n) => n[0])
     .slice(0, 2)
     .join("");
-  return `<span class="avatar">${esc(chars)}${badge ? `<i class="chan">${icon(chIcon(x.channel))}</i>` : ""}</span>`;
+  return `<span class="avatar">${esc(chars)}${x.avatarVersion ? '<img hidden alt="" data-avatar="'+esc(x.id)+'" style="position:absolute;inset:0;width:100%;height:100%;border-radius:50%;object-fit:cover">' : ""}${badge ? `<i class="chan">${icon(chIcon(x.channel))}</i>` : ""}</span>`;
 }
 function toast(msg) {
   $("#toast").textContent = msg;
@@ -103,14 +134,21 @@ function modal(title, html, id = "") {
   $("#modal>header button").hidden = id === "login";
   $("#modaltitle").textContent = title;
   $("#modalbody").innerHTML = html;
+  if ($("#modalbody img[data-photo]")) paintPhotos();
   if (!$("#modal").open) $("#modal").showModal();
 }
 function closeModal() {
+  if (activeModal==="login" && !token) return;
   if ($("#modal").open) $("#modal").close();
   activeModal = "";
 }
 
 async function api(path, method = "GET", data) {
+  if (!token) {
+    if (activeModal!=="login") showAmoLogin("Войдите в рабочий аккаунт amoCRM.");
+    throw Error("Требуется вход через amoCRM");
+  }
+  const requestToken=token;
   const res = await fetch("/api/" + path, {
     method,
     headers: {
@@ -121,32 +159,41 @@ async function api(path, method = "GET", data) {
   });
   const val = await res.json();
   if (!res.ok) {
-    if (res.status === 401 && token) {
+    if (res.status === 401 && token===requestToken) {
       clearIdentity();
-      showAmoLogin("Сессия завершена. Войдите снова.");
+      showAmoLogin("Сессия завершена. Подтверждаем вход.");
+      if(embeddedCRM) {widgetRetries=0;beginSignIn().catch(e=>loginProblem(e.message));}
       nativeApp()?.postMessage({ type: "expired" });
     }
     throw Error(val.error || "Сервис временно недоступен");
   }
   return val;
 }
+let refreshGeneration = 0, historyLimit = 100, knownRevision = "";
 async function refresh() {
-  const s = await api(
-    "state" +
-      (ctx.has("entity")
-        ? "?" +
-          new URLSearchParams({
-            entity: ctx.get("entity"),
-            entityId: ctx.get("entityId") || "",
-          })
-        : ""),
-  );
+  const generation = ++refreshGeneration;
+  const params = new URLSearchParams({view:dealFeedMode?"feed":"inbox",active,limit:String(historyLimit)});
+  if (ctx.get("entity")==="leads") params.set("lead",ctx.get("entityId"));
+  if (dealFeedMode) { params.set("entity","leads"); params.set("entityId",ctx.get("entityId")); }
+  if (dealFeedMode && feedParams.get("timeline")==="1") params.set("timeline","1");
+  if (query.trim()) params.set("q",query.trim());
+  const s = await api("state?"+params);
+  if (generation !== refreshGeneration) return;
+  const loadedBuild=document.documentElement.dataset.build;
+  if (loadedBuild && s.uiBuild && loadedBuild!==s.uiBuild && !activeModal && !sending && !attachment &&
+      !Object.values(drafts).some(Boolean) && !Object.values(noteDrafts).some(Boolean) &&
+      !Object.values(modeDrafts).some(d=>d.attachment||d.reply) && !reply &&
+      !document.querySelector("dialog[open],.attachment-menu,.animation-picker,.voice-strip:not([hidden])")) {
+    location.reload();
+    return;
+  }
+  knownRevision = s.revision;
   Object.assign(profile, s.profile);
   serverChannels = s.channels;
   crm = s.crm;
   crmOrigin = s.crmOrigin || "";
   state = { chats: s.chats, templates: s.templates, sharedSms: s.sharedSms };
-  if (!c()) active = state.chats[0]?.id || "";
+  if (!c()) active = s.selected || state.chats[0]?.id || "";
 }
 async function patch(fields) {
   if (!editable()) throw Error("Требуются права менеджера");
@@ -189,7 +236,8 @@ function renderList() {
         (folder === "archive" ? x.archived : !x.archived) &&
         (folder !== "pinned" || x.pinned) &&
         (tab !== "unanswered" || x.unanswered) &&
-        [
+        (x.searchMatch || [
+          x.phone,
           x.name,
           x.channel,
           x.company,
@@ -198,7 +246,7 @@ function renderList() {
         ]
           .join(" ")
           .toLowerCase()
-          .includes(query.toLowerCase()),
+          .includes(query.toLowerCase())),
     )
     .sort((a, b) =>
       (b.messages.at(-1)?.at || "").localeCompare(a.messages.at(-1)?.at || ""),
@@ -220,20 +268,47 @@ function renderList() {
       list(false, folder === "archive" ? "В архиве" : "Все диалоги") ||
     '<p class="quickempty">Диалогов пока нет</p>';
 }
-function fileHtml(m) {
-  const f = m.file;
-  if (!f) return "";
-  const kind = previewType(f),
-    title = kind ? "Открыть предпросмотр" : "Скачать файл",
-    label = (kind || f.name.split(".").at(-1)).toUpperCase();
-  const details = f.size
-    ? " · " + Math.max(1, Math.round(f.size / 1024)) + " КБ"
-    : "";
-  return `<div class="attachment-row"><button class="filecard" data-file="${esc(m.id)}" title="${title}">${icon("file")}<span><b>${esc(f.name)}</b><small>${esc(label + details)}</small></span></button>${kind ? `<button class="icon file-download" data-download="${esc(m.id)}" title="Скачать файл" aria-label="Скачать ${esc(f.name)}">${icon("download")}</button>` : ""}</div>`;
+function messageFiles(m) {
+  return m.files?.length ? m.files : m.file ? [m.file] : [];
 }
+function isPicture(file) {
+  return ["photo","sticker","gif"].includes(file.kind) ||
+    ((!file.kind || file.kind==="file") && /\.(?:jpe?g|png|webp|gif)$/i.test(file.name));
+}
+function saveControl(file) {
+  const label="Скачать "+esc(file.name);
+  return file.download ? '<a class="icon file-download" href="'+esc(file.download)+'" download="'+esc(file.name)+'" title="'+label+'" aria-label="'+label+'">'+icon("download")+'</a>' :
+    '<button class="icon file-download" data-download="'+esc(file.id)+'" title="'+label+'" aria-label="'+label+'">'+icon("download")+'</button>';
+}
+function fileHtml(m) {
+  const files=messageFiles(m), pictures=files.filter(isPicture);
+  const media=pictures.map(file=>{
+    const label=file.kind==="gif"?"Открыть GIF":file.kind==="sticker"?"Открыть стикер":"Открыть фотографию";
+    return '<div class="picture-tile"><button type="button" class="picture-open" data-file="'+esc(file.id)+'" aria-label="'+label+'">'+
+      '<img class="bechat-photo" data-photo="'+esc(file.id)+'" alt="'+esc(file.name)+'"><span class="picture-fallback">'+icon("file")+label+'</span></button>'+saveControl(file)+'</div>';
+  }).join("");
+  const documents=files.filter(f=>!isPicture(f)).map(f=>{
+    if(BeChatVoice.isVoice(f)) return BeChatVoice.markup(f,m.side==="in");
+    const kind=["video","audio","music"].includes(f.kind)?f.kind:previewType(f);
+    const label=({video:"Видео",audio:"Голосовое",music:"Музыка"})[kind] || (kind || f.name.split(".").at(-1)).toUpperCase();
+    const details=f.size ? " · "+Math.max(1,Math.round(f.size/1024))+" КБ" : "";
+    const content=icon(f.kind==="audio"?"mic":"file")+'<span><b>'+esc(f.name)+'</b><small>'+esc(label+details)+'</small></span>';
+    const card=f.download && !kind ? '<a class="filecard" href="'+esc(f.download)+'" download="'+esc(f.name)+'" title="Скачать файл">'+content+'</a>' :
+      '<button class="filecard" data-file="'+esc(f.id)+'" title="'+(kind?"Открыть предпросмотр":"Скачать файл")+'">'+content+'</button>';
+    return '<div class="attachment-row">'+card+(kind?saveControl(f):"")+'</div>';
+  }).join("");
+  return (media ? '<div class="picture-grid'+(pictures.length>1?' album':'')+'">'+media+'</div>' : "") + documents;
+}
+function messageContent(m) {
+  const attachments=fileHtml(m);
+  if(m.card?.href) return '<div class="message-caption">'+esc(m.text)+'</div><a class="card-open" target="_blank" rel="noopener noreferrer" href="'+esc(m.card.href)+'">'+esc(({poll:"Открыть опрос",tasks:"Открыть список задач",article:"Читать статью"})[m.card.kind])+'</a>';
+  const caption=m.text ? '<div class="message-caption">'+esc(m.text)+'</div>' : "";
+  return messageFiles(m).some(isPicture) ? attachments+caption : caption+attachments;
+}
+const deliveryLabel = {sent:"Отправлено",delivered:"Доставлено",read:"Прочитано"};
 function threadHtml(x) {
   let prior = "";
-  return (
+  return (x.hasEarlier ? '<button class="actionlink" data-act="earlier">Загрузить более ранние сообщения</button>' : "") + (
     x.messages
       .map((m) => {
         let sep = "";
@@ -242,7 +317,7 @@ function threadHtml(x) {
           prior = d;
           sep = `<div class="day">${d === dayKey(Date.now()) ? "Сегодня, " : ""}${date(m.at)}</div>`;
         }
-        return `${sep}<div class="msg ${esc(m.side)}" data-mid="${esc(m.id)}"><div tabindex="0" aria-haspopup="dialog" class="bubble ${m.file ? "filebubble" : ""} ${searchTerm && m.text.toLowerCase().includes(searchTerm.toLowerCase()) ? "hit" : ""}">${m.side === "note" ? "<small>Внутренняя заметка</small><br>" : ""}${m.quote ? `<div class="replyquote">${esc(m.quote)}</div>` : ""}${esc(m.text)}${fileHtml(m)}${m.reaction ? `<button type="button" class="message-reaction" title="Реакция в BeChat" aria-label="Снять реакцию ${esc(m.reaction)}">${esc(m.reaction)}</button>` : ""}<span class="meta">${x.channel === "SMS" && m.side === "out" ? esc(BeChatSms.labels[m.status] || m.status) + " · " : ""}${m.edited ? "изменено · " : ""}${time(m.at)} ${m.side === "out" ? icon(m.status === "read" || m.status === "delivered" ? "checks" : ["sending", "queued", "scheduled", "unknown", "demo"].includes(m.status) ? "clock" : ["failed", "cancelled", "expired"].includes(m.status) ? "close" : "check") : ""}${x.channel !== "SMS" && ["failed", "unknown", "sending"].includes(m.status) ? { failed: "Ошибка", unknown: "Статус уточняется", sending: "Отправляется" }[m.status] : ""}</span></div></div>`;
+        return `${sep}<div class="msg ${esc(m.side)}" data-mid="${esc(m.id)}"><div tabindex="0" aria-haspopup="dialog" class="bubble ${messageFiles(m).some(isPicture) ? "filebubble picture-bubble" : m.file ? "filebubble" : ""} ${searchTerm && m.text.toLowerCase().includes(searchTerm.toLowerCase()) ? "hit" : ""}">${m.side === "note" ? "<small>Внутренняя заметка</small><br>" : ""}${m.quote ? `<div class="replyquote">${esc(m.quote)}</div>` : ""}${messageContent(m)}${m.reaction ? `<button type="button" class="message-reaction" title="Реакция в BeChat" aria-label="Снять реакцию ${esc(m.reaction)}">${esc(m.reaction)}</button>` : ""}<span class="meta">${x.channel === "SMS" && m.side === "out" ? esc(BeChatSms.labels[m.status] || m.status) + " · " : ""}${m.edited ? "изменено · " : ""}${time(m.at)} ${m.side === "out" ? (deliveryLabel[m.status] && x.channel !== "SMS" ? '<span class="delivery-state '+esc(m.status)+'">'+deliveryLabel[m.status]+'</span>' : "") + icon(m.status === "read" || m.status === "delivered" ? "checks" : ["sending", "queued", "scheduled", "unknown", "demo"].includes(m.status) ? "clock" : ["failed", "cancelled", "expired"].includes(m.status) ? "close" : "check") : ""}${x.channel !== "SMS" && ["failed", "unknown", "sending"].includes(m.status) ? { failed: "Ошибка", unknown: "Статус уточняется", sending: "Отправляется" }[m.status] : ""}</span></div></div>`;
       })
       .join("") || '<p class="quickempty">Здесь появятся сообщения диалога</p>'
   );
@@ -256,12 +331,17 @@ function renderHead() {
 }
 function renderCompose() {
   if (!c() || !editable()) {
+    BeChatMedia.cancel();
     $("#composer").innerHTML = "";
     return;
   }
-  const draft = drafts[active] || "";
+  if (BeChatMedia.preserve(active,note) || BeChatAttachments.preserve(active,note)) return;
+  const draft = draftBag()[active] || "";
   $("#composer").innerHTML =
-    `<div class="composewrap"><div class="composeactions"><button class="actionlink ${!note ? "sel" : ""}" data-act="message">${icon("chat")}Сообщение</button><button class="actionlink ${note ? "sel" : ""}" data-act="note">${icon("lock")}Заметка</button><button class="actionlink last" data-act="templates">${icon("bolt")}Шаблоны</button></div>${attachment || reply ? `<div class="attached">${icon(attachment ? "attach" : "reply")}${esc(attachment?.name || reply)}${btn("clearattach", "close", "Убрать")}</div>` : ""}<div class="composebox">${c().channel === "SMS" && !note ? btn("sms-time", "clock", "Запланировать SMS") : ["MAX", "ВКонтакте"].includes(c().channel) && !note ? "" : btn("attach", "attach", "Прикрепить файл")}<textarea id="draft" aria-label="Текст сообщения" placeholder="${note ? "Заметка для коллег…" : "Написать сообщение…"}" maxlength="4000">${esc(draft)}</textarea>${btn("emoji", "smile", "Эмодзи")}${btn("send", "send", note ? "Сохранить заметку" : "Отправить", "icon send")}</div>${c().channel === "SMS" && !note ? '<div class="sms-meter" id="sms-meter"></div>' : ""}</div>`;
+    `<div class="composewrap"><div class="composeactions"><button class="actionlink ${!note ? "sel" : ""}" data-act="message">${icon("chat")}Сообщение</button><button class="actionlink ${note ? "sel" : ""}" data-act="note">${icon("lock")}Заметка</button><button class="actionlink last" data-act="templates">${icon("bolt")}Шаблоны</button></div>${attachment || reply ? `<div class="attached">${icon(attachment ? "attach" : "reply")}${esc(attachment?.name || reply)}${btn("clearattach", "close", "Убрать")}</div>` : ""}<div class="composebox">${c().channel === "SMS" && !note ? btn("sms-time", "clock", "Запланировать SMS") : btn("attach", "attach", "Прикрепить файл")}<textarea id="draft" aria-label="Текст сообщения" placeholder="${note ? "Заметка для коллег…" : "Написать сообщение…"}" maxlength="4000">${esc(draft)}</textarea>${btn("emoji", "smile", "Эмодзи")}${btn("send", "send", note ? "Сохранить заметку" : "Отправить", "icon send")}</div>${c().channel === "SMS" && !note ? '<div class="sms-meter" id="sms-meter"></div>' : ""}</div>`;
+  const clip = $('#composer [data-act="attach"]');
+  if (clip) { clip.setAttribute("aria-haspopup","menu"); clip.setAttribute("aria-expanded","false"); }
+  BeChatMedia.mount();
   updateSmsMeter();
 }
 function renderDetails() {
@@ -297,6 +377,7 @@ function syncMotion() {
 }
 reducedMotion.addEventListener("change", syncMotion);
 function render(scroll = true) {
+  if (dealFeedMode) { renderDealFeed(); return; }
   renderRail();
   renderList();
   renderHead();
@@ -316,13 +397,21 @@ function render(scroll = true) {
   renderDetails();
   if (scroll) el.scrollTop = el.scrollHeight;
   else el.scrollTop = pos;
+  BeChatVoice.mount();
   window.beChatMessageMenu?.sync();
   syncMotion();
+  paintPhotos();
 }
 function openChat(id) {
+  BeChatAttachments.close();
+  BeChatMedia.cancel();
+  if(active!==id)BeChatVoice.stop();
+  if (active) modeDrafts[active+"|"+String(note)]={attachment,reply};
   active = id;
-  attachment = null;
-  reply = null;
+  historyLimit = 100;
+  const saved=modeDrafts[id+"|false"];
+  attachment = saved?.attachment||null;
+  reply = saved?.reply||null;
   searchTerm = null;
   note = false;
   document.body.classList.add("chat-open");
@@ -331,6 +420,7 @@ function openChat(id) {
   void $("#thread").offsetWidth;
   $("#thread").classList.add("switching");
   render();
+  guarded(async()=>{await refresh(); if(active===id) render();});
 }
 function selectedForm() {
   return new FormData($("#modalbody form"));
@@ -371,20 +461,35 @@ async function attachmentBlob(file, signal) {
       headers: { Authorization: "Bearer " + token },
       signal,
     });
-    if (!response.ok) throw Error("Файл недоступен");
+    if (!response.ok) {
+      let reason;
+      try {reason=(await response.json()).error;} catch {}
+      throw Error(reason || "Ошибка получения файла · "+response.status);
+    }
     return response.blob();
   }
 }
 async function activateAttachment(id, button, save = false) {
-  const file = c()?.messages.find((m) => m.id === id)?.file;
+  const file = c()?.messages.flatMap(m=>m.files || (m.file?[m.file]:[])).find(f=>f.id===id) || c()?.messages.find(m=>m.id===id)?.file;
   if (!file) return;
+  if (!save && (isPicture(file) || ["video","audio","music"].includes(file.kind))) {
+    const url=URL.createObjectURL(await attachmentBlob(file));
+    modal(file.name,"","media-preview");
+    const el=document.createElement(["audio","music"].includes(file.kind)?"audio":file.kind==="video"?"video":"img");
+    el.style.cssText="display:block;max-width:100%;max-height:72vh;margin:auto";
+    if (el.tagName!=="IMG") el.controls=true; else el.alt=file.name;
+    el.src=url;
+    $("#modalbody").append(el);
+    $("#modal").addEventListener("close",()=>URL.revokeObjectURL(url),{once:true});
+    return;
+  }
   if (!save && previewType(file)) return openDocument(file, button);
   downloadBlob(await attachmentBlob(file), file.name);
 }
 async function send() {
   if (sending || !editable() || !c()) return;
   const x = c(),
-    txt = (drafts[active] || "").trim(),
+    txt = (draftBag()[active] || "").trim(),
     f = attachment,
     q = reply,
     isNote = note;
@@ -399,6 +504,7 @@ async function send() {
     f?.name,
     f?.size,
     f?.lastModified,
+    f?.card, f?.beChatKind,
     q,
     isNote,
     x.channel === "SMS" ? smsSchedule[active] : null,
@@ -422,7 +528,8 @@ async function send() {
       : {}),
   };
   try {
-    if (f) {
+    if(f?.card) msg.card=f.card;
+    else if (f) {
       {
         const r = await fetch("/api/files", {
           method: "POST",
@@ -435,7 +542,7 @@ async function send() {
         });
         const j = await r.json();
         if (!r.ok) throw Error(j.error);
-        msg.file = j;
+        msg.file = f.beChatKind ? {...j,kind:f.beChatKind} : j;
       }
     }
     {
@@ -443,9 +550,10 @@ async function send() {
       await refresh();
     }
     if (!isNote) delete smsSchedule[x.id];
+    delete modeDrafts[x.id+"|"+String(isNote)];
     delete attempts[x.id];
-    delete drafts[x.id];
-    if (active === x.id) {
+    if ((draftBag(isNote)[x.id]||"").trim()===txt) delete draftBag(isNote)[x.id];
+    if (active === x.id && note === isNote && attachment===f) {
       attachment = null;
       reply = null;
     }
@@ -457,6 +565,12 @@ async function send() {
   }
 }
 async function handle(act) {
+  if (act === "earlier") {
+    const el=$("#thread"), height=el.scrollHeight, top=el.scrollTop;
+    historyLimit+=200;
+    await refresh(); render(false); el.scrollTop=top+el.scrollHeight-height;
+    return;
+  }
   if (act === "close") {
     if (activeModal !== "login") closeModal();
     return;
@@ -520,6 +634,7 @@ async function handle(act) {
             esc(commonSender || "Ожидает подключения учредителем") +
             "</small></div>") +
         "" +
+        (embeddedCRM ? '<details class="formhint"><summary>Данные для настройки</summary>ID аккаунта: '+esc(window.BECHAT_CONFIG?.accountId||"")+'<br>Мой ID в amoCRM: '+esc(profile.crmUserId)+'</details>' : "") +
         modalBtn("logout", "lock", "Выйти"),
     );
     return;
@@ -560,7 +675,7 @@ async function handle(act) {
       "Новый диалог",
       form(
         "new",
-        field("Имя контакта", "name", "", "text", true) +
+        field("Имя контакта (необязательно)", "name", "", "text") +
           channelSelector(channels) +
           field("Аккаунт или телефон", "peer", "", "text", true) +
           '<p id="recipient-hint" class="minor"></p>',
@@ -572,22 +687,13 @@ async function handle(act) {
     function labelRecipient() {
       const ch = channels[Number(picker.value)],
         sms = ch === "SMS";
-      f.elements.name.required = !sms;
-      f.elements.peer.type = ["SMS", "WhatsApp"].includes(ch) ? "tel" : "text";
-      f.elements.peer.closest("label").querySelector("span").textContent = [
-        "SMS",
-        "WhatsApp",
-      ].includes(ch)
-        ? "Номер телефона"
-        : "ID диалога " + ch;
-      $("#recipient-hint").textContent =
-        {
-          SMS: "Сообщение уйдёт с общего номера или имени организации.",
-          Telegram: "Укажите @имя или числовой ID личного собеседника.",
-          WhatsApp: "Введите номер WhatsApp с кодом страны.",
-          MAX: "Укажите ID личного диалога вашего аккаунта MAX.",
-          ВКонтакте: "Введите ID или короткое имя личной страницы собеседника.",
-        }[ch] || "";
+      f.elements.name.required = false;
+      f.elements.peer.type = "tel";
+      f.elements.peer.autocomplete = "tel";
+      f.elements.peer.placeholder = "+7 999 123-45-67";
+      f.elements.peer.closest("label").querySelector("span").textContent = "Номер телефона";
+      $("#recipient-hint").textContent = sms ? "Сообщение уйдёт с общего номера или имени организации." :
+        ch === "ВКонтакте" ? "Поиск среди контактов ВКонтакте с доступным номером." : "Найдём собеседника в " + ch + " по номеру с кодом страны.";
     }
     picker.addEventListener("change", labelRecipient);
     labelRecipient();
@@ -641,13 +747,23 @@ async function handle(act) {
     return;
   }
   if (act === "message" || act === "note") {
-    note = act === "note";
+    BeChatAttachments.close();
+    BeChatMedia.cancel();
+    const nextNote=act==="note";
+    if (note!==nextNote) {
+      const key=active+"|"+String(note);
+      modeDrafts[key]={attachment,reply};
+      const next=modeDrafts[active+"|"+String(nextNote)];
+      attachment=next?.attachment||null;
+      reply=next?.reply||null;
+    }
+    note = nextNote;
     renderCompose();
     $("#draft").focus();
     return;
   }
   if (act === "attach") {
-    $("#fileinput").click();
+    BeChatAttachments.toggle();
     return;
   }
   if (act === "clearattach") {
@@ -660,6 +776,7 @@ async function handle(act) {
     await send();
     return;
   }
+  if (act === "emoji" && !note && c()?.channel!=="SMS") return BeChatMedia.picker();
   if (act === "emoji") {
     modal(
       "Эмодзи",
@@ -670,6 +787,7 @@ async function handle(act) {
     return;
   }
   if (act === "find") {
+    if (c()?.hasEarlier) {historyLimit=10000000;await refresh();render(false);}
     const existing = document.querySelector(".threadsearch");
     if (existing) {
       existing.remove();
@@ -823,10 +941,12 @@ async function submit(action, fd) {
       chat.name = chat.name || chat.peer;
       chat.smsNumber = chat.peer;
     }
-    if (!chat.name || !chat.peer) throw Error("Укажите имя и аккаунт");
+    chat.peer = BeChatSms.normalize(chat.peer);
+    chat.name ||= chat.peer;
     {
       const v = await api("chats", "POST", {
         ...chat,
+        lookup:"phone",
         entity: ctx.get("entity"),
         entityId: ctx.get("entityId"),
       });
@@ -902,6 +1022,7 @@ document.addEventListener("click", (e) =>
   guarded(async () => {
     const target = e.target.closest("button");
     if (!target) return;
+    if (!token && !target.closest("#modal")) {showAmoLogin(); if(embeddedCRM) await beginSignIn(); return;}
     const a = target.dataset;
     if (a.act) return handle(a.act);
     if (a.chat) return openChat(a.chat);
@@ -920,7 +1041,7 @@ document.addEventListener("click", (e) =>
     if (a.edit) return templateForm(a.edit);
     if (a.template && c() && editable()) {
       const t = state.templates.find((t) => t.id === a.template);
-      drafts[active] = t.text.replaceAll("{имя}", c().name.split(" ")[0]);
+      draftBag()[active] = t.text.replaceAll("{имя}", c().name.split(" ")[0]);
       closeModal();
       renderCompose();
       $("#draft").focus();
@@ -939,7 +1060,7 @@ document.addEventListener("click", (e) =>
       return;
     }
     if (a.emoji) {
-      drafts[active] = (drafts[active] || "") + a.emoji;
+      draftBag()[active] = (draftBag()[active] || "") + a.emoji;
       closeModal();
       renderCompose();
       $("#draft").focus();
@@ -971,12 +1092,15 @@ document.addEventListener("submit", (e) => {
 });
 document.addEventListener("input", (e) => {
   if (e.target.id === "draft") {
-    drafts[active] = e.target.value;
+    draftBag()[active] = e.target.value;
+    BeChatMedia.sync();
     updateSmsMeter();
   }
   if (e.target.id === "query") {
     query = e.target.value;
-    renderList();
+    renderList(); paintPhotos();
+    clearTimeout(renderList.timer);
+    renderList.timer=setTimeout(()=>guarded(async()=>{await refresh();renderList();paintPhotos();}),250);
   }
   if (e.target.id === "threadq") {
     searchTerm = e.target.value;
@@ -993,7 +1117,11 @@ document.addEventListener("change", (e) =>
     if (e.target.id === "fileinput") {
       const f = e.target.files[0];
       e.target.value = "";
-      if (!f) return;
+      if (!f || e.target.dataset.chat!==active || e.target.dataset.mode!==String(note)) return;
+      const purpose=e.target.dataset.purpose, name=f.name.toLowerCase();
+      f.beChatKind=purpose==="media" && /\.(jpe?g|png|webp)$/.test(name)?"photo":
+        purpose==="media" && /\.(mp4|mov|webm)$/.test(name)?"video":
+        purpose==="music" && /\.(mp3|ogg|m4a|wav)$/.test(name)?"music":undefined;
       if (f.size > 8 * 1024 * 1024)
         throw Error("Максимальный размер файла — 8 МБ");
       attachment = f;
@@ -1047,33 +1175,30 @@ document.addEventListener("dblclick", (e) => {
 });
 async function boot() {
   await bootIdentity();
-  setInterval(async () => {
-    if (
-      !token ||
-      busy ||
-      sending ||
-      document.hidden ||
-      $("#modal").open ||
-      $("#file-preview").open
-    )
-      return;
-    const old = JSON.stringify(state),
-      el = $("#thread"),
-      bottom = el.scrollHeight - el.clientHeight - el.scrollTop < 35,
-      hadFocus = document.activeElement?.id === "draft",
-      start = hadFocus ? $("#draft").selectionStart : 0;
+  const pause = ms => new Promise(done=>setTimeout(done,ms));
+  while (true) {
+    if (!token || document.hidden) {await pause(400); continue;}
     try {
+      const before = knownRevision;
+      const update = await api("changes?since="+encodeURIComponent(before));
+      if (!token || document.hidden) continue;
+      while (busy || sending) await pause(120);
+      const el=$("#thread"), bottom=el.scrollHeight-el.clientHeight-el.scrollTop<35;
+      const old = JSON.stringify(state), focused=document.activeElement?.id==="draft";
+      const position=focused ? $("#draft").selectionStart : 0;
       await refresh();
-      if (JSON.stringify(state) !== old) {
+      if (old!==JSON.stringify(state)) {
         render(bottom);
-        if (hadFocus && $("#draft")) {
-          $("#draft").focus();
-          $("#draft").setSelectionRange(start, start);
-        }
+        if (focused && $("#draft")) {$("#draft").focus(); $("#draft").setSelectionRange(position,position);}
       }
-    } catch (e) {
-      if (token) toast(e.message);
-    }
-  }, 5000);
+      if (update.revision!==before) await pause(180);
+    } catch {await pause(1200);}
+  }
 }
 boot();
+
+window.addEventListener("message",event=>{
+  if (!embeddedCRM || dealFeedMode || event.source!==parent || event.origin!==window.BECHAT_CONFIG?.crmOrigin ||
+      event.data?.type!=="bechat:panel:settings" || !token || !profile.crmUserId) return;
+  guarded(()=>handle("settings"));
+});

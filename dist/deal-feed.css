@@ -1,0 +1,17 @@
+body.deal-feed { display:block; height:auto; min-height:0; overflow:auto; background:transparent; color:var(--text,#e2e9ff); }
+body.deal-feed > :not(#deal-conversations,#modal,#toast) { display:none!important; }
+#deal-conversations { box-sizing:border-box; width:100%; padding:8px 12px; font:13px/1.45 system-ui,sans-serif; color:#e3ebff; background:#0c1834; border:1px solid #364967; border-radius:6px; }
+#deal-conversations header { text-align:center; color:#b3c6ed; font-weight:600; }
+#deal-conversations article + article { margin-top:12px; border-top:1px solid #364967; padding-top:10px; }
+#deal-conversations p { margin:3px 0; white-space:pre-wrap; overflow-wrap:anywhere; }
+#deal-conversations .feed-line { display:flex; margin:7px 0; }
+#deal-conversations .feed-line.out { justify-content:flex-end; }
+#deal-conversations .feed-line > div { max-width:78%; border-radius:8px; padding:6px 10px; background:#152340; }
+#deal-conversations .feed-line.out > div { background:#213f76; }
+#deal-conversations small { color:#c1d0eb; font-size:11px; }
+#deal-conversations footer,.feed-choices { display:flex; gap:6px; flex-wrap:wrap; justify-content:flex-end; padding-top:5px; }
+#deal-conversations button { color:#d5e4ff; background:#182a4c; border:1px solid #3a5072; border-radius:5px; padding:5px 9px; cursor:pointer; }
+
+#bechat-auth-pending {display:none}
+body.bechat-auth-pending > :not(#bechat-auth-pending) {visibility:hidden}
+body.bechat-auth-pending > #bechat-auth-pending {display:grid!important;place-items:center;position:fixed;inset:0;margin:0;font:14px system-ui;color:var(--text);background:var(--bg);z-index:1000}

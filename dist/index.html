@@ -9,9 +9,11 @@
     <meta name="theme-color" content="#03051c" />
     <title>BeChat — сообщения</title>
     <link rel="stylesheet" href="app.css" />
+    <link rel="stylesheet" href="composer-media.css" />
     <link rel="stylesheet" href="message-menu.css" />
     <link rel="stylesheet" href="theme.css" />
     <link rel="stylesheet" href="preview.css" />
+    <link rel="stylesheet" href="deal-feed.css" />
     <script src="theme.js"></script>
     <link rel="icon" href="mark.svg" />
   </head>
@@ -80,7 +82,10 @@
           >
           <div class="tabs" id="tabs"></div>
         </div>
-        <div id="chatlist" class="chatlist"></div>
+        <div class="chatlist-wrap">
+          <div id="chatlist" class="chatlist" tabindex="0" aria-label="Список диалогов"></div>
+          <div class="chat-scroll" aria-hidden="true" hidden><i></i></div>
+        </div>
         <button class="channelsfoot" data-act="channels">
           <svg><use href="#i-network" /></svg>Каналы связи<svg class="last">
             <use href="#i-right" />
@@ -107,10 +112,10 @@
       <header>
         <span class="viewer-type" aria-hidden="true"></span>
         <h2 id="viewer-title"></h2>
-        <button id="viewer-download" type="button" aria-label="Скачать файл">
+        <a id="viewer-download" download aria-label="Скачать файл">
           <svg aria-hidden="true"><use href="#i-download" /></svg
           ><span>Скачать</span>
-        </button>
+        </a>
         <button
           id="viewer-close"
           type="button"
@@ -177,6 +182,11 @@
     <script src="sms-ui.js"></script>
     <script src="document-preview.js"></script>
     <script src="identity.js"></script>
+    <script src="deal-feed.js"></script>
+    <script src="chat-scroll.js"></script>
+    <script src="attachments-menu.js"></script>
+    <script src="composer-media.js"></script>
+    <script src="voice-player.js"></script>
     <script src="app.js"></script>
     <script src="message-menu.js"></script>
   </body>

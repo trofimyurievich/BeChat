@@ -3,7 +3,57 @@ const embeddedCRM =
   window.parent !== window &&
   new URLSearchParams(location.search).get("embed") === "1";
 const nativeApp = () => window.webkit?.messageHandlers?.bechatIdentity;
-let widgetAttempt = null;
+let widgetAttempt = null, widgetRetries = 0, fallback = null;
+function pendingIdentity() {
+  if ($("#modal").open && activeModal==="login") $("#modal").close();
+  activeModal="";
+  document.body.classList.add("bechat-auth-pending");
+  let status=document.getElementById("bechat-auth-pending");
+  if (!status) {status=document.createElement("p");status.id="bechat-auth-pending";status.setAttribute("role","status");document.body.append(status);}
+  status.textContent="Открываем BeChat…";
+}
+function loginProblem(message) {
+  if (typeof dealFeedMode!=="undefined" && dealFeedMode) {
+    document.body.classList.remove("bechat-auth-pending");
+    const panel=document.getElementById("deal-conversations");
+    if($("#modal").open) $("#modal").close();
+    panel.innerHTML='<p>Ожидаем подтверждение от amoCRM.</p><footer><button type="button" data-feed="open">Открыть BeChat</button></footer>';
+    return;
+  }
+  document.body.classList.remove("bechat-auth-pending");
+  if (!document.querySelector("#auth-status") || !document.querySelector("#modal")?.open) showAmoLogin(message);
+  else authStatus(message);
+  const button=document.getElementById("amo-signin");
+  if (embeddedCRM && button) {
+    button.hidden=false;
+    button.textContent="Войти в отдельном окне amoCRM";
+    button.onclick=()=>guarded(openCrmWindow);
+  }
+}
+function widgetFailure(message) {
+  if (widgetRetries++ < 1) { setTimeout(()=>{if(!token && !widgetAttempt) beginSignIn().catch(()=>loginProblem(message));},450); }
+  else loginProblem(message);
+}
+async function openCrmWindow() {
+  const child=window.open("about:blank","_blank","popup,width=760,height=740");
+  if (!child) return loginProblem("Разрешите всплывающее окно для входа через amoCRM.");
+  const proof=await makeProof();
+  fallback={...proof,child};
+  const target=new URL("/auth/start",location.origin);
+  target.search=new URLSearchParams({client:"web",challenge:proof.challenge,nonce:proof.nonce});
+  child.location.replace(target.href);
+  authStatus("Завершите вход в открывшемся окне amoCRM.");
+}
+window.addEventListener("message",async e=>{
+  if (!fallback || e.origin!==location.origin || e.source!==fallback.child || e.data?.type!=="bechat:oauth:done" || e.data.nonce!==fallback.nonce) return;
+  const attempt=fallback; fallback=null;
+  attempt.child.close();
+  try {
+    if (!e.data.ticket) throw Error("Вход не завершён. Откройте рабочий аккаунт amoCRM.");
+    await redeem(e.data.ticket,attempt.verifier,"web");
+  } catch(error) {loginProblem(error.message);}
+});
+
 const enc64 = (bytes) =>
   btoa(String.fromCharCode(...new Uint8Array(bytes)))
     .replaceAll("+", "-")
@@ -21,13 +71,18 @@ async function makeProof() {
 }
 function clearIdentity() {
   token = "";
+  if(typeof thumbnails!=="undefined"){for(const p of thumbnails.values())p.then(src=>{if(src)URL.revokeObjectURL(src);}); thumbnails.clear();}
+  if (typeof photos!=="undefined") {for(const p of photos.values())p.then(src=>{if(src)URL.revokeObjectURL(src);}); photos.clear();}
   try {
+    sessionStorage.removeItem("bechat-widget-session");
     sessionStorage.removeItem("bechat-session-v2");
   } catch {}
   state = { chats: [], templates: [] };
   active = "";
   Object.assign(profile, { name: "", role: "", founder: false });
-  for (const store of [drafts, attempts, smsSchedule])
+  BeChatVoice.clear();
+  if(dealFeedMode){publishedHistory="";timelineGeneration++;loadingHistory="";feedParent("history",{lead:feedParams.get("entityId"),items:[]});}
+  for (const store of [drafts,noteDrafts,modeDrafts, attempts, smsSchedule])
     for (const k of Object.keys(store)) delete store[k];
   attachment = null;
   reply = null;
@@ -35,6 +90,8 @@ function clearIdentity() {
   render();
 }
 function showAmoLogin(message = "") {
+  if (typeof dealFeedMode!=="undefined" && dealFeedMode) return loginProblem(message);
+  document.body.classList.remove("bechat-auth-pending");
   modal(
     "Вход в BeChat",
     '<div class="identity-form"><p>Войдите в рабочий аккаунт amoCRM. Переписка откроется с правами вашего сотрудника.</p><button class="primary" type="button" id="amo-signin">Войти через amoCRM</button><p class="minor" id="auth-status" role="status">' +
@@ -54,10 +111,14 @@ async function acceptSession(value) {
   token = value;
   try {
     await refresh();
+    const expected=embeddedCRM && new URLSearchParams(location.search).get("crmUser");
+    if(expected && String(profile.crmUserId)!==expected) {clearIdentity();throw Error("Выберите в amoCRM сотрудника, открывшего сделку.");}
   } catch (e) {
     token = "";
     throw e;
   }
+  if (embeddedCRM) {try {sessionStorage.setItem("bechat-widget-session",value);} catch {}}
+  document.body.classList.remove("bechat-auth-pending");
   if (!embeddedCRM && !nativeApp())
     try {
       sessionStorage.setItem("bechat-session-v2", token);
@@ -68,8 +129,28 @@ async function acceptSession(value) {
   }
   closeModal();
   render();
+  if (embeddedCRM && !dealFeedMode && ctx.get("open")==="settings") await handle("settings");
+  widgetRetries=0;
+  if(embeddedCRM) parent.postMessage({type:"bechat:sso:active",uid:profile.crmUserId},window.BECHAT_CONFIG.crmOrigin);
 }
 async function redeem(code, verifier, client) {
+  if (client==="widget" && typeof code==="string" && code.startsWith("resume.")) {
+    const challenge=enc64(await crypto.subtle.digest("SHA-256",new TextEncoder().encode(verifier)));
+    let cached;
+    try {cached=sessionStorage.getItem("bechat-widget-session");} catch {}
+    const resume=async(session)=>fetch("/auth/widget-resume",{method:"POST",credentials:"include",headers:{
+      "Content-Type":"application/json",...(session?{Authorization:"Bearer "+session}:{})
+    },body:JSON.stringify({assertion:code,challenge})});
+    let result=await resume(cached);
+    if (!result.ok && cached) result=await resume("");
+    for (const delay of [200,500,1000,1600]) {
+      if (result.ok || !embeddedCRM) break;
+      await new Promise(resolve=>setTimeout(resolve,delay));
+      result=await resume("");
+    }
+    if(!result.ok) throw Error("Для этого браузера требуется подтверждение сотрудника через amoCRM.");
+    code=(await result.json()).ticket;
+  }
   const response = await fetch("/auth/exchange", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -92,11 +173,9 @@ async function beginSignIn() {
     proof.timer = setTimeout(() => {
       if (widgetAttempt === proof) {
         widgetAttempt = null;
-        authStatus(
-          "Виджет не ответил. Проверьте адрес сервера в настройках amoCRM и повторите вход.",
-        );
+        widgetFailure("amoCRM не ответила на запрос автоматического входа.");
       }
-    }, 15000);
+    }, 9000);
     authStatus("Подтверждаем вход через виджет amoCRM…");
     window.parent.postMessage(
       {
@@ -130,6 +209,17 @@ async function beginSignIn() {
   });
   location.assign(target.href);
 }
+window.addEventListener("message", async e=>{
+  if (!embeddedCRM || !token || e.source!==parent || e.origin!==window.BECHAT_CONFIG?.crmOrigin ||
+      e.data?.type!=="bechat:sso:delegate" || !/^[\w-]{43}$/.test(e.data.nonce||"") ||
+      !/^[\w-]{43}$/.test(e.data.challenge||"")) return;
+  let ticket=null;
+  try {
+    const r=await fetch("/auth/widget-ticket",{method:"POST",headers:{"Content-Type":"application/json",Authorization:"Bearer "+token},
+      body:JSON.stringify({uid:e.data.uid,challenge:e.data.challenge})});
+    if(r.ok) ticket=(await r.json()).ticket;
+  } finally {parent.postMessage({type:"bechat:sso:delegated",nonce:e.data.nonce,ticket},e.origin);}
+});
 window.addEventListener("message", (e) => {
   if (
     !embeddedCRM ||
@@ -144,13 +234,11 @@ window.addEventListener("message", (e) => {
   widgetAttempt = null;
   clearTimeout(attempt.timer);
   if (!e.data.ticket) {
-    authStatus(
-      "amoCRM не подтвердила вход. Проверьте настройки интеграции или повторите попытку.",
-    );
+    widgetFailure(e.data.message || "Не удалось подтвердить вход из виджета.");
     return;
   }
   redeem(e.data.ticket, attempt.verifier, "widget").catch((err) =>
-    authStatus(err.message),
+    widgetFailure(err.message),
   );
 });
 window.beChatNativeSession = async function (value) {
@@ -170,13 +258,18 @@ async function bootIdentity() {
   render();
   if (embeddedCRM) {
     token = "";
-    showAmoLogin();
+    pendingIdentity();
     await beginSignIn();
     return;
   }
   const result = new URLSearchParams(location.hash.slice(1));
   if (result.has("ticket") || result.has("error")) {
     history.replaceState(null, "", location.pathname + location.search);
+    if (window.opener && result.get("nonce")) {
+      window.opener.postMessage({type:"bechat:oauth:done",nonce:result.get("nonce"),ticket:result.get("ticket")},location.origin);
+      document.body.textContent="Вход обрабатывается. Вернитесь к карточке сделки.";
+      return;
+    }
     let pending;
     try {
       pending = JSON.parse(sessionStorage.getItem("bechat-oauth"));

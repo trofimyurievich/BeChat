@@ -13,7 +13,9 @@ function fail(status, message) {
 const knownStates = {
   starting: "Подключение",
   qr: "Отсканируйте QR на своём телефоне",
-  password: "Введите пароль двухэтапной проверки Telegram",
+  password: "Введите пароль двухэтапной проверки",
+  code: "Введите код подтверждения от MAX",
+  confirming: "Телефон подтвердил вход. Подключаем профиль MAX…",
   oauth: "Разрешите BeChat доступ в VK ID",
   online: "Подключён",
   offline: "Восстанавливаем связь",
@@ -32,6 +34,11 @@ export function createPersonal(db, onMessage, options = {}) {
   db.exec(`CREATE TABLE IF NOT EXISTS direct_accounts(id TEXT PRIMARY KEY,owner TEXT NOT NULL,channel TEXT NOT NULL,external TEXT,label TEXT NOT NULL DEFAULT '',status TEXT NOT NULL,history INTEGER NOT NULL DEFAULT 0);
     CREATE UNIQUE INDEX IF NOT EXISTS direct_active_owner ON direct_accounts(owner,channel) WHERE status!='removed';
     CREATE UNIQUE INDEX IF NOT EXISTS direct_active_identity ON direct_accounts(channel,external) WHERE external IS NOT NULL AND status!='removed';`);
+  if (!db.prepare("PRAGMA table_info(direct_accounts)").all().some(c => c.name === "auth_method"))
+    db.exec("ALTER TABLE direct_accounts ADD COLUMN auth_method TEXT NOT NULL DEFAULT 'qr'");
+  if (!db.prepare("PRAGMA table_info(direct_accounts)").all().some(c => c.name === "history_version"))
+    db.exec("ALTER TABLE direct_accounts ADD COLUMN history_version INTEGER NOT NULL DEFAULT 0; UPDATE direct_accounts SET history=1 WHERE status!='removed'");
+  db.exec("CREATE TABLE IF NOT EXISTS personal_code_limits (key TEXT PRIMARY KEY, until INTEGER NOT NULL)");
   const row = (id) =>
     db
       .prepare("SELECT * FROM direct_accounts WHERE id=? AND status!='removed'")
@@ -62,10 +69,11 @@ export function createPersonal(db, onMessage, options = {}) {
         channel,
         id: a?.id,
         label: a?.label || "",
+        method: a?.auth_method || "qr",
         ready: a?.status === "online",
         status: a?.status || "new",
         description:
-          live?.error ||
+          live?.error || live?.historyError ||
           issues.get(a?.id) ||
           knownStates[a?.status] ||
           "Личный аккаунт",
@@ -83,7 +91,7 @@ export function createPersonal(db, onMessage, options = {}) {
         client.waiting.delete(key);
         reject(Error("Ответ мессенджера не получен"));
       }, timeout);
-      client.waiting.set(key, { resolve, reject, timer });
+      client.waiting.set(key, { resolve, reject, timer, op });
       client.child.stdin.write(
         JSON.stringify({ op, request: key, ...data }) + "\n",
         (e) => {
@@ -95,7 +103,7 @@ export function createPersonal(db, onMessage, options = {}) {
       );
     });
   }
-  function start(a) {
+  function start(a, phone = "") {
     if (running.has(a.id)) return;
     clearTimeout(retries.get(a.id));
     retries.delete(a.id);
@@ -116,6 +124,8 @@ export function createPersonal(db, onMessage, options = {}) {
           TG_API_ID: env.TG_API_ID || "",
           TG_API_HASH: env.TG_API_HASH || "",
           VK_APP_ID: env.VK_APP_ID || "",
+          BECHAT_MAX_METHOD: a.auth_method || "qr",
+          BECHAT_MAX_PHONE: phone,
           PUBLIC_ORIGIN: env.PUBLIC_ORIGIN,
           BECHAT_SESSION_CIPHER: createHmac("sha256", master)
             .update(a.id)
@@ -158,9 +168,10 @@ export function createPersonal(db, onMessage, options = {}) {
         if (!p) return;
         clearTimeout(p.timer);
         live.waiting.delete(event.request);
+        if (event.error && p.op==="media") console.warn("MAX media lookup:",/^[a-zA-Z]{1,60}$/.test(event.error)?event.error:"Error");
         if (event.error)
           p.reject(
-            Object.assign(Error("Мессенджер отклонил операцию"), { http: 422 }),
+            Object.assign(Error(p.op === "resolve" ? "Контакт не найден по этому номеру или поиск ограничен настройками профиля." : "Мессенджер отклонил операцию"), { http: 422 }),
           );
         else p.resolve(event.value);
         return;
@@ -168,7 +179,7 @@ export function createPersonal(db, onMessage, options = {}) {
       if (live.closing) return;
       if (event.type === "prompt") {
         live.online = false;
-        live.prompt = null;
+        live.prompt = event.mode==="code" ? {digits:Number.isInteger(event.digits) && event.digits>=4 && event.digits<=10 ? event.digits : null, codeRejected:event.reason==="CodeRejected"} : null;
         if (
           event.mode === "qr" &&
           typeof event.image === "string" &&
@@ -183,7 +194,7 @@ export function createPersonal(db, onMessage, options = {}) {
         ) {
           live.vkState = event.state;
           live.prompt = { authorize: event.url };
-        } else if (event.mode !== "password") return;
+        } else if (!["password", "code", "confirming"].includes(event.mode)) return;
         set(a.id, event.mode);
       } else if (event.type === "ready") {
         const current = row(a.id),
@@ -212,7 +223,21 @@ export function createPersonal(db, onMessage, options = {}) {
           "UPDATE direct_accounts SET external=?,label=?,status='online' WHERE id=? AND status!='removed'",
         ).run(external, String(event.label || external).slice(0, 160), a.id);
       } else if (event.type === "history_complete" && live.online) {
-        db.prepare("UPDATE direct_accounts SET history=0 WHERE id=?").run(a.id);
+        live.historyError = "";
+        db.prepare("UPDATE direct_accounts SET history=0,history_version=1 WHERE id=?").run(a.id);
+      } else if (event.type === "history_error" && live.online) {
+        live.historyError = "Подключён. Повторяем загрузку истории.";
+        console.warn("BeChat history retry:", a.channel, /^[A-Za-z]{1,60}$/.test(event.reason) ? event.reason : "Error");
+      } else if (event.type === "receipt" && live.online) {
+        const peer = String(event.peer || "");
+        if (peer && peer.length <= 150) onMessage({receipt:true,channel:a.channel,accountId:a.id,owner:a.owner,
+          peer:a.id+":"+peer,basis:event.basis,position:event.position,remoteId:String(event.remote||"").slice(0,220),status:event.status});
+      } else if (event.type === "profile" && live.online) {
+        const peer = String(event.peer || "");
+        if (!peer || peer.length > 150) return;
+        const photo = typeof event.photo === "string" && event.photo.length < 36000 && event.photo.startsWith("/9j/") ? event.photo : null;
+        onMessage({profile:true, channel:a.channel, accountId:a.id, owner:a.owner, remotePeer:peer, peer:a.id+":"+peer,
+          name: String(event.name || "").slice(0,200), phone:String(event.phone || "").slice(0,32), photo});
       } else if (event.type === "message" && live.online) {
         const peer = String(event.peer || ""),
           remote = String(event.remote || "");
@@ -240,6 +265,7 @@ export function createPersonal(db, onMessage, options = {}) {
           at: Number.isFinite(Date.parse(event.at))
             ? new Date(event.at).toISOString()
             : new Date().toISOString(),
+          mediaItems: a.channel==="MAX" && Array.isArray(event.media) ? event.media.slice(0,100) : [],
           directFile: file && file.bytes.length <= 8388608 ? file : null,
         });
       } else if (event.type === "revoked") {
@@ -248,10 +274,21 @@ export function createPersonal(db, onMessage, options = {}) {
         set(a.id, "failed");
         child.kill();
       } else if (event.type === "error") {
-        live.error =
-          event.reason === "PermissionError"
-            ? "Платформа отказала в доступе. Проверьте разрешения приложения."
-            : "Связь с мессенджером прервалась. Повторите подключение.";
+        const reasons = {
+          TimeoutError: "Время подтверждения истекло. Начните вход ещё раз.",
+          CodeRejected: "MAX отклонил введённые коды. Начните новую попытку по номеру.",
+          CodeExpired: "Срок действия SMS-кода истёк. Запросите новый код по номеру.",
+          NoProfile: "MAX не нашёл зарегистрированный профиль для этого номера. Проверьте номер.",
+          ConfirmationIncomplete: "MAX не завершил подтверждение профиля.",
+          ConfirmationDenied: "MAX отклонил подтверждение входа по номеру. Проверьте уведомления в приложении MAX.",
+          ApiError: "MAX отклонил запрос подключения. Выбранный способ входа сохранён.",
+          RateLimit: "MAX временно ограничил попытки входа. Повторите позже.",
+          PasswordAttemptsExceededError: "Мессенджер отклонил пароль двухэтапной проверки.",
+          PermissionError: "Платформа отказала в доступе. Проверьте разрешения приложения.",
+          ValidationError: "Формат ответа мессенджера изменился. Обратитесь к администратору BeChat.",
+        };
+        live.error = reasons[event.reason] || "Связь с мессенджером прервалась. Повторите подключение.";
+        console.warn("BeChat pairing:", a.channel, row(a.id)?.status, /^[a-zA-Z]{1,50}$/.test(event.reason) ? event.reason : "Error");
       }
     }
     reader.on("line", (line) => {
@@ -291,27 +328,49 @@ export function createPersonal(db, onMessage, options = {}) {
       fail(400, "Выберите вход в личный аккаунт");
     if (requirements(v.channel)) fail(503, requirements(v.channel));
     let a = owned(user.login, v.channel);
+    const method = v.method || "qr";
+    if (method !== "qr" && !(v.channel === "MAX" && method === "phone")) fail(400, "Выберите способ входа");
+    if (a && running.has(a.id)) return list(user.login);
+    const phone = String(v.phone || "").replace(/[\s()-]/g, "");
+    if (method === "phone") {
+      if (!/^\+[1-9]\d{6,14}$/.test(phone)) fail(400, "Введите номер с кодом страны, например +7…");
+      const now = Date.now();
+      const key = createHmac("sha256", env.BECHAT_ACCOUNT_KEY).update(phone).digest("hex");
+      db.prepare("DELETE FROM personal_code_limits WHERE until<=?").run(now);
+      const keys = [key, "owner:" + user.login];
+      if (keys.some(k => db.prepare("SELECT 1 FROM personal_code_limits WHERE key=?").get(k)))
+        fail(429, "Подождите минуту перед повторным запросом кода");
+      for (const k of keys) db.prepare("INSERT INTO personal_code_limits VALUES(?,?)").run(k, now + 60000);
+    }
     if (!a) {
       const id = randomUUID();
       db.prepare(
         "INSERT INTO direct_accounts(id,owner,channel,status,history) VALUES(?,?,?,'starting',?)",
-      ).run(id, user.login, v.channel, v.history ? 1 : 0);
+      ).run(id, user.login, v.channel, 1);
       a = row(id);
     }
-    start(a);
+    if (!a.external) {
+      db.prepare("UPDATE direct_accounts SET auth_method=?,history=? WHERE id=?").run(method, 1, a.id);
+      a = row(a.id);
+    }
+    start(a, phone);
     return list(user.login);
   }
   async function answer(owner, channel, value) {
     const a = owned(owner, channel);
     if (
-      a?.status !== "password" ||
+      !["password", "code"].includes(a?.status) ||
       typeof value !== "string" ||
       !value ||
       value.length > 500
     )
       fail(409, "Попытка входа завершена");
-    set(a.id, "starting");
-    await request(running.get(a.id), "answer", { answer: value });
+    if (a.status === "code" && !/^\d{4,10}$/.test(value)) fail(400, "Введите цифры из кода подтверждения");
+    const live = running.get(a.id);
+    if (a.status === "code" && live?.prompt?.digits && value.length!==live.prompt.digits)
+      fail(400,"Введите все цифры из SMS");
+    set(a.id, "confirming");
+    await request(live, "answer", { answer: value });
     return list(owner);
   }
   async function vkCallback(params) {
@@ -387,7 +446,7 @@ export function createPersonal(db, onMessage, options = {}) {
           text: m.text,
           file: file
             ? {
-                name: file.name,
+                name: file.name, kind:m.file?.kind, duration:m.file?.duration,
                 bytes: Buffer.from(file.bytes).toString("base64"),
               }
             : null,
@@ -416,6 +475,12 @@ export function createPersonal(db, onMessage, options = {}) {
     remove,
     pick,
     resolvePeer,
+    async media(chat, ref) {
+      const meta=JSON.parse(chat.meta), a=row(meta.accountId);
+      if(!a || a.owner!==chat.owner || a.channel!=="MAX" || !running.get(a.id)?.online)
+        fail(409,"Для открытия вложения подключите аккаунт MAX");
+      return request(running.get(a.id),"media",{peer:meta.remotePeer,messageId:ref.message,slot:ref.slot});
+    },
     send,
     available: (owner) =>
       list(owner)

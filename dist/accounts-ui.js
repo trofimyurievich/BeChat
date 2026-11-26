@@ -102,7 +102,21 @@ async function openAccount(channel, update = false) {
   clearTimeout(pairingTimer);
   const pageId = "personal-" + channel,
     version = ++pairingVersion;
-  const a = (await api("accounts")).find((row) => row.channel === channel);
+  const visible = () => version === pairingVersion && activeModal === pageId && $("#modal").open;
+  const poll = (delay = 1500) => {
+    pairingTimer = setTimeout(() => {
+      if (visible()) guarded(() => openAccount(channel, true));
+    }, delay);
+  };
+  let a;
+  try {
+    a = (await api("accounts")).find((row) => row.channel === channel);
+  } catch (err) {
+    if (!update || !visible()) throw err;
+    toast("Нет ответа от сервера. Повторяем проверку подключения.");
+    poll(3500);
+    return;
+  }
   if (
     !a ||
     version !== pairingVersion ||
@@ -148,16 +162,21 @@ async function openAccount(channel, update = false) {
       (editable()
         ? '<form class="pair-form"><p>' +
           esc(pairingHints[channel]) +
-          '</p><label class="pair-choice"><input type="checkbox" name="history">Добавить недавнюю историю личных диалогов</label><button class="primary" type="submit">' +
+          '</p>' + (channel === "MAX" ? '<label class="formfield"><span>Способ входа</span><select name="method"><option value="qr">По QR-коду</option><option value="phone">По номеру телефона</option></select></label><label class="formfield" id="pair-phone-wrap" style="display:none"><span>Номер в MAX с кодом страны</span><input type="tel" name="phone" autocomplete="tel" placeholder="+7…" disabled></label>' : '') +
+          '<p class="minor">После входа появится доступная история личных диалогов.</p><button class="primary" type="submit">' +
           (a.status === "new"
             ? "Подключить личный аккаунт"
             : "Повторить подключение") +
           "</button></form>"
         : "");
-  } else if (a.status === "password") {
-    if (update && $("#pair-password")) return;
-    body =
-      '<form><label class="formfield"><span>Пароль двухэтапной проверки Telegram</span><input id="pair-password" name="answer" type="password" autocomplete="off" required></label><button class="primary" type="submit">Подтвердить</button></form>';
+  } else if (a.status === "password" || a.status === "code") {
+    if (update && $("#pair-answer")?.dataset.step === a.status && !a.codeRejected) { poll(); return; }
+    if (update && a.codeRejected && $("#pair-answer")?.dataset.rejected==="1") {poll();return;}
+    const code = a.status === "code";
+    body = '<form>' + (a.codeRejected ? '<p class="pair-notice" role="alert">MAX не принял код. Проверьте цифры в последней SMS и введите ещё раз.</p>' : '') + '<label class="formfield"><span>' + (code ? "Код подтверждения от MAX" : "Пароль двухэтапной проверки " + esc(channel)) +
+      '</span><input id="pair-answer" data-step="' + a.status + '" name="answer" ' +
+      (code ? 'type="text" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{4,10}"' : 'type="password" autocomplete="off"') +
+      ' required></label><button class="primary" type="submit">Подтвердить</button></form>';
   } else if (a.authorize) {
     body =
       "<p>" +
@@ -176,19 +195,41 @@ async function openAccount(channel, update = false) {
     body =
       '<p role="status" class="pair-notice">' + esc(a.description) + "</p>";
   modal(channel, intro + body + disconnect + back, pageId);
+  const answer=$("#pair-answer");
+  if (answer) {
+    answer.dataset.rejected=a.codeRejected?"1":"0";
+    if (a.status==="code" && a.digits) {answer.pattern="[0-9]{"+a.digits+"}";answer.maxLength=a.digits;}
+  }
+  const method = $("#modalbody select[name=method]");
+  if (method) {
+    method.value=a.method==="phone"?"phone":"qr";
+    method.onchange = () => {
+    const phone = $("#modalbody input[name=phone]");
+    const usePhone = method.value === "phone";
+    phone.disabled = !usePhone;
+    phone.required = usePhone;
+    $("#pair-phone-wrap").style.display = usePhone ? "" : "none";
+    $("#modalbody .pair-form > p").textContent=usePhone ? "Введите номер, к которому привязан профиль MAX. Затем введите код из SMS." : pairingHints[channel];
+    if (usePhone && document.activeElement===method) phone.focus();
+    };
+    method.onchange();
+  }
   if ($("#modalbody form"))
     bindSettingsForm(async (values) => {
-      if (a.status === "password")
+      ++pairingVersion; clearTimeout(pairingTimer);
+      if (a.status === "password" || a.status === "code")
         await api("accounts", "POST", {
           op: "answer",
           channel,
-          answer: values.answer,
+          answer: a.status==="code" ? values.answer.trim() : values.answer,
         });
       else
         await api("accounts", "POST", {
           op: "connect",
           channel,
-          history: values.history === "on",
+          method: values.method || "qr",
+          phone: values.phone,
+          history: true,
         });
       await openAccount(channel);
     });
@@ -197,11 +238,7 @@ async function openAccount(channel, update = false) {
     render();
     return;
   }
-  if (["starting", "qr", "oauth"].includes(a.status))
-    pairingTimer = setTimeout(() => {
-      if ($("#modal").open && activeModal === pageId)
-        guarded(() => openAccount(channel, true));
-    }, 1500);
+  if (["starting", "qr", "oauth", "code", "password", "confirming"].includes(a.status)) poll();
 }
 document.addEventListener("click", (e) => {
   const b = e.target.closest("[data-setting]");

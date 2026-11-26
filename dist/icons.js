@@ -1,5 +1,10 @@
 "use strict";
 const paths = {
+  image: '<rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="8" cy="9" r="1.5"/><path d="m4 17 5-5 4 4 3-3 4 4"/>',
+  music: '<path d="M9 18V6l11-3v13M9 9l11-3"/><ellipse cx="6" cy="18" rx="3" ry="2.5"/><ellipse cx="17" cy="16" rx="3" ry="2.5"/>',
+  poll: '<path d="M4 20v-8m6 8V4m6 16V9m5 11v-5"/>',
+  location: '<path d="M19 10c0 5-7 11-7 11S5 15 5 10a7 7 0 0 1 14 0Z"/><circle cx="12" cy="10" r="2.5"/>',
+  mic: '<rect x="9" y="2" width="6" height="13" rx="3"/><path d="M5 11a7 7 0 0 0 14 0m-7 7v4m-4 0h8"/>',
   edit: '<path d="m4 16 12-12a2 2 0 0 1 3 3L7 19l-4 1zM14 6l3 3"/>',
   copy: '<rect x="8" y="5" width="12" height="16" rx="2"/><path d="M5 17H4a1 1 0 0 1-1-1V4a2 2 0 0 1 2-2h10"/>',
   forward: '<path d="m15 4 7 7-7 7v-5c-6 0-10 2-12 6 0-9 4-12 12-11z"/>',

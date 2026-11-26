@@ -1,11 +1,18 @@
+import { makeCard, cardPages } from "./cards.mjs";
+import { searchGifs, getAnimation, normalizeVoice, voiceText } from "./media.mjs";
+import { createReadReceipts } from "./receipts.mjs";
 import { createAuth, authConfig } from "./auth.mjs";
 import { legacyMedia } from "./accounts.mjs";
 import { createPersonal } from "./personal.mjs";
 import { createSmsService } from "./sms.mjs";
 import smsCore from "../dist/sms-core.js";
+import { get as httpsGet } from "node:https";
+import { rootCertificates } from "node:tls";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import { createServer } from "node:http";
 import { DatabaseSync } from "node:sqlite";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { resolve, dirname, extname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -30,6 +37,21 @@ import {
 const env = process.env,
   base = dirname(fileURLToPath(import.meta.url)),
   dist = resolve(base, "../dist");
+const uiHash=createHash("sha256");
+for (const asset of readdirSync(dist).filter(s=>/\.(html|js|css)$/.test(s)).sort())
+  uiHash.update(asset).update(readFileSync(resolve(dist,asset)));
+const uiBuild=uiHash.digest("hex").slice(0,16);
+const maxAuthority = await readFile(new URL("./max-root.pem", import.meta.url), "utf8");
+function maxDownload(url, signal) {
+  const onMax = url.hostname==="oneme.ru" || url.hostname.endsWith(".oneme.ru") || url.hostname==="max.ru" || url.hostname.endsWith(".max.ru");
+  if (!onMax) return fetch(url,{redirect:"manual",signal});
+  return new Promise((done,reject) => {
+    const request=httpsGet(url,{signal,ca:[...rootCertificates,maxAuthority]}, response => {
+      done(new Response(Readable.toWeb(response),{status:response.statusCode,headers:response.headers}));
+    });
+    request.once("error",reject);
+  });
+}
 const authSettings = authConfig(env);
 const dbPath = resolve(env.BECHAT_DB || "data/bechat.sqlite");
 mkdirSync(dirname(dbPath), { recursive: true });
@@ -39,6 +61,13 @@ CREATE TABLE IF NOT EXISTS chats(id TEXT PRIMARY KEY,channel TEXT,peer TEXT,owne
 CREATE TABLE IF NOT EXISTS messages(id TEXT PRIMARY KEY,chat TEXT REFERENCES chats(id),remote TEXT,body TEXT);
 CREATE TABLE IF NOT EXISTS message_views(message TEXT REFERENCES messages(id),login TEXT,edited_text TEXT,reaction TEXT,hidden INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(message,login));
 CREATE INDEX IF NOT EXISTS msg_chat ON messages(chat);
+CREATE INDEX IF NOT EXISTS msg_chat_date ON messages(chat,json_extract(body,'$.at'));
+CREATE INDEX IF NOT EXISTS msg_chat_remote ON messages(chat,remote);
+CREATE TABLE IF NOT EXISTS crm_chat_links(owner TEXT,chat TEXT REFERENCES chats(id),lead TEXT,contact TEXT,PRIMARY KEY(owner,chat,lead,contact));
+CREATE TABLE IF NOT EXISTS crm_contact_numbers(owner TEXT,lead TEXT,contact TEXT,phone TEXT,PRIMARY KEY(owner,lead,contact,phone));
+CREATE TABLE IF NOT EXISTS crm_phone_checks(owner TEXT,phone TEXT,checked INTEGER NOT NULL,PRIMARY KEY(owner,phone));
+CREATE INDEX IF NOT EXISTS crm_exact_phone ON crm_contact_numbers(owner,phone);
+CREATE TABLE IF NOT EXISTS avatars(chat TEXT PRIMARY KEY REFERENCES chats(id),digest TEXT NOT NULL, jpeg TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS files(id TEXT PRIMARY KEY,owner TEXT,chat TEXT,name TEXT,mime TEXT,size INTEGER,remote TEXT,bytes BLOB);
 CREATE TABLE IF NOT EXISTS templates(id TEXT PRIMARY KEY,title TEXT,text TEXT);
 CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY,path TEXT,body TEXT,attempt INTEGER DEFAULT 0,due INTEGER DEFAULT 0);
@@ -74,6 +103,28 @@ const trim = (s, n = 400) =>
     .trim()
     .slice(0, n);
 const auth = createAuth(db, authSettings, { readBody, json });
+const clockId = randomUUID(), revisions = new Map(), listeners = new Set();
+let sequence = 0, sharedRevision = 0;
+function signal(chat) {
+  const row = one("SELECT owner,meta FROM chats WHERE id=?",chat);
+  if (!row) return;
+  if (JSON.parse(row.meta).accountId) revisions.set(row.owner,++sequence);
+  else sharedRevision = ++sequence;
+  for (const fn of listeners) fn();
+}
+function revision(login) { return clockId + ":" + Math.max(sharedRevision,revisions.get(login)||0); }
+function listenChanges(login,since,res) {
+  const finish = () => { clean(); json(res,{revision:revision(login)}); };
+  const change = () => { if (revision(login)!==since) finish(); };
+  const clean = () => { clearTimeout(timer); listeners.delete(change); res.off("close",clean); };
+  const timer = setTimeout(finish,22000);
+  res.once("close",clean);
+  listeners.add(change);
+  change();
+}
+function normalPhone(value) {
+  try { return smsCore.normalize(value); } catch { return ""; }
+}
 const accounts = createPersonal(db, (value) =>
   transaction(() => ingest(value)),
 );
@@ -170,7 +221,7 @@ async function pump() {
   }
 }
 setInterval(pump, 5000).unref();
-const put = (chat, m, remote = null) =>
+const put = (chat, m, remote = null) => {
   run(
     "INSERT INTO messages VALUES(?,?,?,?)",
     m.id,
@@ -178,6 +229,8 @@ const put = (chat, m, remote = null) =>
     remote,
     JSON.stringify(m),
   );
+  signal(chat);
+};
 const update = (m, remote = null) =>
   run(
     "UPDATE messages SET body=?,remote=COALESCE(?,remote) WHERE id=?",
@@ -185,6 +238,7 @@ const update = (m, remote = null) =>
     remote,
     m.id,
   );
+const readReceipts = createReadReceipts(db, setStatus, signal);
 const delivery = { sent: 1, delivered: 2, read: 3, failed: 4 };
 function setStatus(m, status) {
   if (!delivery[status] || delivery[status] <= (delivery[m.status] || 0))
@@ -203,7 +257,27 @@ function setStatus(m, status) {
       },
     );
 }
+function linkByPhone(row, phone) {
+  if (!phone) return;
+  const inserted=run("INSERT OR IGNORE INTO crm_chat_links SELECT owner,?,lead,contact FROM crm_contact_numbers WHERE owner=? AND phone=?",row.id,row.owner,phone);
+  if (inserted.changes) signal(row.id);
+}
 function ingest(v) {
+  if (v.receipt && v.accountId) return readReceipts.receive(v);
+  if (v.profile) {
+    const row = getChat(v.channel,v.peer,v.name || v.remotePeer,v.owner,{accountId:v.accountId,remotePeer:v.remotePeer});
+    const meta = JSON.parse(row.meta);
+    if (v.name) meta.name = v.name;
+    if (normalPhone(v.phone)) meta.phone = normalPhone(v.phone);
+    if (v.photo) {
+      const digest = createHash("sha256").update(v.photo).digest("hex");
+      run("INSERT OR REPLACE INTO avatars VALUES(?,?,?)",row.id,digest,v.photo);
+      meta.avatarVersion = digest;
+    }
+    linkByPhone(row, meta.phone);
+    if (JSON.stringify(meta)!==row.meta) { saveMeta(row.id,meta); signal(row.id); }
+    return;
+  }
   if (v.status) {
     if (!delivery[v.status]) return;
     const receiptKey = v.accountId
@@ -224,13 +298,13 @@ function ingest(v) {
       v.peer,
       v.remoteId,
     );
-    if (row) setStatus(JSON.parse(row.body), v.status);
+    if (row) { setStatus(JSON.parse(row.body), v.status); signal(row.chat); }
     return;
   }
   const mid = createHash("sha256")
     .update(JSON.stringify([v.channel, v.peer, v.remoteId]))
     .digest("hex");
-  if (one("SELECT id FROM messages WHERE id=?", mid)) return;
+
   const row = getChat(
       v.channel,
       v.peer,
@@ -239,11 +313,23 @@ function ingest(v) {
       v.accountId ? { accountId: v.accountId, remotePeer: v.remotePeer } : {},
     ),
     meta = JSON.parse(row.meta);
-  if (
-    v.accountId &&
-    one("SELECT id FROM messages WHERE chat=? AND remote=?", row.id, v.remoteId)
-  )
+  const saved = one("SELECT * FROM messages WHERE id=? OR (chat=? AND remote=?) LIMIT 1",mid,row.id,v.remoteId);
+  const attachments = (v.mediaItems||[]).filter(f=>Number.isSafeInteger(f.slot) && f.slot>=0 && f.slot<100).map(f=>{
+    const fid=createHash("sha256").update(mid+":"+f.slot).digest("hex"), name=trim(f.name,180)||"Вложение";
+    const kind=["photo","video","audio","sticker"].includes(f.kind)?f.kind:"file";
+    const contentType=({photo:"image/jpeg",video:"video/mp4",audio:"audio/ogg",sticker:"image/webp"})[kind] || mime[extname(name).toLowerCase()] || "application/octet-stream";
+    run("INSERT OR IGNORE INTO files VALUES(?,?,?,?,?,?,?,?)",fid,row.owner,row.id,name,contentType,Number(f.size)||0,JSON.stringify({provider:"MAX",message:v.remoteId,slot:f.slot}),null);
+    return {id:fid,name,kind,mime:contentType,size:Number(f.size)||0};
+  });
+  if(saved) {
+    const original=JSON.parse(saved.body);
+    if(attachments.length && (JSON.stringify(original.files)!==JSON.stringify(attachments) || original.text==="[Вложение MAX]")) {
+      original.files=attachments;original.file=attachments[0];
+      if(original.text==="[Вложение MAX]") original.text=v.text||"";
+      update(original); signal(row.id);
+    }
     return;
+  }
   if (!v.outgoing && !v.history) meta.unanswered = (meta.unanswered || 0) + 1;
   meta.archived = false;
   if (v.username) meta.username = v.username;
@@ -253,7 +339,8 @@ function ingest(v) {
     side: v.outgoing ? "out" : "in",
     text: v.text || "",
     at: v.at,
-    ...(v.outgoing ? { status: "sent" } : {}),
+    ...(v.outgoing ? { status: readReceipts.forMessage(v.channel,v.peer,v.remoteId,v.at) || "sent" } : {}),
+    ...(attachments.length?{files:attachments,file:attachments[0]}:{}),
   };
   if (v.directFile) {
     const f = v.directFile,
@@ -365,12 +452,20 @@ async function sendMessage(u, row, input, amoId = "") {
         )
       : null;
   if (input.file && !file) bad(400, "Файл недоступен");
-  if (!text && !file) bad(400, "Введите текст");
+  const card = input.card ? makeCard(input.card) : null;
+  if (card && (file || row.channel==="SMS" && !isNote)) bad(400,"Этот канал не поддерживает карточки");
+  if (!text && !file && !card) bad(400, "Введите текст");
   if (!isNote && file && text.length > 1000)
     bad(400, "Подпись к файлу ограничена 1000 символами");
+  const kind = input.file?.kind;
+  if (kind && (!file || !((kind==="audio" && file.mime==="audio/ogg") ||
+      (kind==="photo" && ["image/jpeg","image/png","image/webp"].includes(file.mime)) ||
+      (kind==="music" && file.mime.startsWith("audio/")) || (kind==="video" && file.mime.startsWith("video/")) ||
+      (["gif","sticker"].includes(kind) && file.mime==="image/gif")))) bad(400,"Неверный формат медиа");
   const m = {
     id: mid,
-    text,
+    text:card ? [text,card.title].filter(Boolean).join("\n") : text,
+    ...(card ? {card} : {}),
     quote: trim(input.quote, 220),
     side: isNote ? "note" : "out",
     author: u.name,
@@ -378,7 +473,7 @@ async function sendMessage(u, row, input, amoId = "") {
     status: isNote ? "saved" : "sending",
     ...(amoId ? { amoId } : {}),
     ...(file
-      ? { file: { id: file.id, name: file.name, size: file.size } }
+      ? { file: { id: file.id, name: file.name, size: file.size, ...(kind ? {kind,mime:file.mime,duration:Math.max(0,Math.min(600000,Number(input.file.duration)||0))} : {}) } }
       : {}),
   };
   if (row.channel === "SMS" && !isNote) {
@@ -405,9 +500,10 @@ async function sendMessage(u, row, input, amoId = "") {
     const quoted = m.quote
       ? { ...m, text: "❝ " + m.quote + "\n\n" + m.text }
       : m;
+    const outbound=card ? {...quoted,text:quoted.text+"\n"+authSettings.origin+"/share/"+card.id} : quoted;
     const remote = JSON.parse(row.meta).accountId
-      ? await accounts.send(row, quoted, file)
-      : await sendProvider(row, quoted, file);
+      ? await accounts.send(row, outbound, file)
+      : await sendProvider(row, outbound, file);
     transaction(() => {
       m.status = "sent";
       update(m, remote);
@@ -442,6 +538,9 @@ async function sendMessage(u, row, input, amoId = "") {
           );
         }
       }
+      const observed = readReceipts.forMessage(row.channel,row.peer,remote,m.at);
+      if (observed) setStatus(m,observed);
+      signal(row.id);
       if (row.channel === "WhatsApp") {
         const account = JSON.parse(row.meta).accountId;
         const s = one(
@@ -509,7 +608,15 @@ const mime = {
   ".jpg": "image/jpeg",
   ".webp": "image/webp",
   ".png": "image/png",
+  ".jpeg": "image/jpeg",
+  ".mov": "video/quicktime",
+  ".webm": "video/webm",
+  ".m4a": "audio/mp4",
+  ".wav": "audio/wav",
   ".txt": "text/plain",
+  ".json": "application/json; charset=utf-8",
+  ".ogg": "audio/ogg",
+  ".gif": "image/gif",
   ".mp3": "audio/mpeg",
   ".mp4": "video/mp4",
   ".docx":
@@ -520,6 +627,42 @@ const mime = {
   ".js": "text/javascript; charset=utf-8",
   ".css": "text/css; charset=utf-8",
 };
+async function attachmentSource(f,row,res) {
+      if(row?.channel==="MAX" && f.remote?.startsWith("{") && JSON.parse(f.remote).provider==="MAX") {
+        const value = await accounts.media(row,JSON.parse(f.remote));
+        let target;
+        try { target=new URL(value); } catch { bad(410,"Мессенджер больше не предоставляет файл"); }
+        const cdns=["max.ru","oneme.ru","okcdn.ru","mycdn.me","vkuser.net","userapi.com","ok.ru","vkvideo.ru"];
+        const safe = u=>u.protocol==="https:" && !u.username && !u.password && (!u.port || u.port==="443") && cdns.some(d=>u.hostname===d || u.hostname.endsWith("."+d));
+        const abort = new AbortController();
+        res.once("close",()=>abort.abort());
+        let upstream;
+        for(let n=0;n<4;n++) {
+          if(!safe(target)) bad(422,"Адрес вложения не принадлежит хранилищу MAX");
+          try {
+            upstream=await maxDownload(target,AbortSignal.any([abort.signal,AbortSignal.timeout(240000)]));
+          } catch(error) {
+            console.warn("MAX content host:",target.hostname,error.cause?.code||error.name);throw error;
+          }
+          if (![301,302,303,307,308].includes(upstream.status)) break;
+          const dest=upstream.headers.get("location"); await upstream.body?.cancel();
+          if(!dest) break;
+          target=new URL(dest,target);
+        }
+        if(!upstream?.ok) {await upstream?.body?.cancel();bad(410,"MAX не предоставил вложение");}
+        return Readable.fromWeb(upstream.body);
+      }
+      const bytes = f.bytes
+        ? Buffer.from(f.bytes)
+        : await fetchMedia(
+            row.channel,
+            f.remote,
+            JSON.parse(row.meta).accountId
+              ? legacyMedia(db, JSON.parse(row.meta).accountId)
+              : undefined,
+          );
+      return bytes;
+}
 async function route(req, res) {
   const url = new URL(req.url, "http://localhost"),
     path = url.pathname,
@@ -528,8 +671,9 @@ async function route(req, res) {
   res.setHeader("Referrer-Policy", "no-referrer");
   res.setHeader(
     "Content-Security-Policy",
-    `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; connect-src 'self'; frame-ancestors 'self' ${crmOrigin || ""}; object-src 'none'; base-uri 'none'; form-action 'self'`,
+    `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data: https://upload.wikimedia.org https://fonts.gstatic.com; media-src 'self' blob:; connect-src 'self'; frame-ancestors 'self' ${crmOrigin || ""}; object-src 'none'; base-uri 'none'; form-action 'self'`,
   );
+  if (path.startsWith("/share/")) return serveCard(req,res,url);
   if (path === "/docx-frame.html")
     res.setHeader(
       "Content-Security-Policy",
@@ -630,10 +774,96 @@ async function route(req, res) {
     return json(res, { service: "BeChat", status: "live" });
   if (path === "/healthz" && method === "GET") {
     if (!one("SELECT 1 AS healthy")?.healthy) bad(503, "База недоступна");
-    return json(res, { service: "BeChat", version: "1.1.0", status: "ok" });
+    return json(res, { service: "BeChat", version: "1.1.7", status: "ok" });
   }
   if (path.startsWith("/api/")) {
-    const u = auth.current(req);
+    const u = method==="GET" && path.startsWith("/api/files/") && url.searchParams.has("download")
+      ? auth.fileUser(path.slice(11),url.searchParams.get("download")) : auth.current(req);
+    if (path.startsWith("/api/voice-text/") && method==="POST") {
+      const f=one("SELECT * FROM files WHERE id=?",path.slice("/api/voice-text/".length));
+      if(!f || !f.chat)bad(404,"Файл недоступен");
+      const row=visibleChat(f.chat,u);
+      if(!(f.mime||"").startsWith("audio/") || f.size>8388608)bad(422,"Выберите голосовое сообщение до 8 МБ");
+      const result=await voiceText(f.id,async()=>{
+        const src=await attachmentSource(f,row,res);
+        return Buffer.isBuffer(src)?src:readBody(src,8388608);
+      });
+      return json(res,result);
+    }
+    if (path === "/api/library" && method === "GET") return json(res,await searchGifs(url.searchParams));
+    if (path === "/api/library/file" && method === "GET") {
+      const bytes=await getAnimation(url.searchParams);
+      res.writeHead(200,{"Content-Type":"image/gif","Cache-Control":"private, max-age=3600"});
+      return res.end(bytes);
+    }
+    if (path === "/api/changes" && method === "GET") return listenChanges(u.login,url.searchParams.get("since"),res);
+    if (path === "/api/contact-match") {
+      requireWrite(u);
+      if (method==="GET") {
+        const row=one("SELECT DISTINCT json_extract(c.meta,'$.phone') AS phone FROM chats c LEFT JOIN crm_phone_checks t ON t.phone=json_extract(c.meta,'$.phone') AND t.owner=c.owner WHERE c.owner=? AND json_extract(c.meta,'$.accountId') IS NOT NULL AND json_extract(c.meta,'$.phone') IS NOT NULL AND COALESCE(t.checked,0)<? ORDER BY COALESCE(t.checked,0),c.rowid DESC LIMIT 1",u.login,Date.now()-86400000);
+        return json(res,{phone:row?.phone||null});
+      }
+      if(method!=="POST") bad(405,"Требуется POST");
+      const v=parse(await readBody(req,8192)), phone=normalPhone(v.phone);
+      if (!phone || !Array.isArray(v.matches) || !one("SELECT 1 FROM chats WHERE owner=? AND json_extract(meta,'$.phone')=?",u.login,phone))
+        bad(400,"Контакт недоступен");
+      transaction(()=>{
+        run("INSERT OR REPLACE INTO crm_phone_checks VALUES(?,?,?)",u.login,phone,Date.now());
+        if(v.matches.length!==1) return;
+        const entry=v.matches[0];
+        if(!/^[1-9]\d{0,15}$/.test(String(entry.id)) || !Array.isArray(entry.leads)) return;
+        for(const lead of entry.leads.filter(x=>/^[1-9]\d{0,15}$/.test(String(x)))) {
+          run("INSERT OR IGNORE INTO crm_contact_numbers VALUES(?,?,?,?)",u.login,String(lead),String(entry.id),phone);
+        }
+        for(const row of many("SELECT * FROM chats WHERE owner=? AND json_extract(meta,'$.phone')=?",u.login,phone)) linkByPhone(row,phone);
+      });
+      return json(res,{ok:true});
+    }
+    if (path === "/api/contact-photos" && method === "POST") {
+      const {contacts,lead} = parse(await readBody(req,16384));
+      if (!Array.isArray(contacts) || contacts.length>50) bad(400,"Проверьте контакты сделки");
+      if (/^[1-9]\d{0,15}$/.test(String(lead)) && u.role!=="observer") transaction(()=>{
+        run("DELETE FROM crm_contact_numbers WHERE owner=? AND lead=?",u.login,String(lead));
+        for (const c of contacts) {
+          if(!/^[1-9]\d{0,15}$/.test(String(c?.id))) continue;
+          for(const p of (Array.isArray(c.phones)?c.phones:[]).map(normalPhone).filter(Boolean))
+            run("INSERT OR IGNORE INTO crm_contact_numbers VALUES(?,?,?,?)",u.login,String(lead),String(c.id),p);
+        }
+        run("DELETE FROM crm_chat_links WHERE owner=? AND lead=? AND NOT EXISTS(SELECT 1 FROM crm_contact_numbers n JOIN chats c ON c.owner=n.owner AND json_extract(c.meta,'$.phone')=n.phone WHERE n.lead=crm_chat_links.lead AND n.contact=crm_chat_links.contact AND c.id=crm_chat_links.chat)",u.login,String(lead));
+        const inserted=run("INSERT OR IGNORE INTO crm_chat_links SELECT c.owner,c.id,n.lead,n.contact FROM crm_contact_numbers n JOIN chats c ON c.owner=n.owner AND json_extract(c.meta,'$.phone')=n.phone WHERE n.owner=? AND n.lead=?",u.login,String(lead));
+        if (inserted.changes) for(const r of many("SELECT chat FROM crm_chat_links WHERE owner=? AND lead=?",u.login,String(lead))) signal(r.chat);
+      });
+      const rows = many("SELECT c.*,a.jpeg FROM chats c JOIN avatars a ON a.chat=c.id WHERE c.owner=?",u.login);
+      return json(res,contacts.map(c => {
+        const phones = new Set((Array.isArray(c.phones)?c.phones:[]).map(normalPhone).filter(Boolean));
+        return {id:String(c.id),photos:rows.filter(r => {
+          const m = JSON.parse(r.meta);
+          return canSee(u,r) && ((m.contactId && String(m.contactId)===String(c.id)) || phones.has(normalPhone(m.phone)));
+        }).map(r=>({channel:r.channel,src:"data:image/jpeg;base64,"+r.jpeg}))};
+      }));
+    }
+    if (path.startsWith("/api/avatar/") && method==="GET") {
+      const chat=visibleChat(path.slice(12),u);
+      const pic=one("SELECT jpeg FROM avatars WHERE chat=?",chat.id);
+      if (!pic) bad(404,"Фото недоступно");
+      res.writeHead(200,{"Content-Type":"image/jpeg","Cache-Control":"private, no-store"});
+      return res.end(Buffer.from(pic.jpeg,"base64"));
+    }
+    if (path === "/api/deal-dialogs") {
+      requireWrite(u);
+      if (method === "GET") return json(res, many("SELECT * FROM chats ORDER BY rowid DESC")
+        .filter(r => canSee(u,r) && r.owner === u.login && !metadata(r).leadId)
+        .map(r => ({id:r.id,channel:r.channel,name:metadata(r).name})));
+      if (method !== "POST") bad(405,"Требуется POST");
+      const v = parse(await readBody(req,4096));
+      if (!/^[1-9]\d{0,15}$/.test(String(v.lead))) bad(400,"Не удалось определить сделку");
+      const row = one("SELECT * FROM chats WHERE id=?", trim(v.chat));
+      if (!row || row.owner !== u.login || !canSee(u,row)) bad(404,"Диалог недоступен");
+      const meta = JSON.parse(row.meta);
+      if (meta.leadId && String(meta.leadId) !== String(v.lead)) bad(409,"Диалог уже привязан к другой сделке");
+      saveMeta(row.id,{...meta,leadId:String(v.lead)});
+      return json(res,{ok:true});
+    }
     if (path === "/api/logout" && method === "POST") {
       auth.logout(req);
       return json(res, { ok: true });
@@ -661,35 +891,68 @@ async function route(req, res) {
       return json(res, smsService.overview(u.role === "founder"));
     if (path === "/api/sms" && method === "POST")
       return json(res, smsService.manage(u, parse(await readBody(req))));
+    if (path === "/api/deal-timeline" && method === "GET") {
+      const lead=url.searchParams.get("lead"), after=Number(url.searchParams.get("after")||0);
+      if (!/^[1-9]\d*$/.test(lead||"") || !Number.isSafeInteger(after) || after<0)
+        bad(400,"Неверная страница истории");
+      const linked=new Set(many("SELECT chat FROM crm_chat_links WHERE owner=? AND lead=?",u.login,lead).map(r=>r.chat));
+      const chats=many("SELECT * FROM chats").filter(r=>canSee(u,r) && (linked.has(r.id)||String(JSON.parse(r.meta).leadId||"")===lead));
+      const byId=new Map(chats.map(r=>[r.id,metadata(r)]));
+      if (!chats.length) return json(res,{items:[],next:null});
+      const page=many("SELECT m.rowid AS cursor,m.chat,m.body,v.edited_text FROM messages m LEFT JOIN message_views v ON v.message=m.id AND v.login=? WHERE m.rowid>? AND m.chat IN (SELECT value FROM json_each(?)) AND COALESCE(v.hidden,0)=0 AND json_extract(m.body,'$.side') IN ('in','out') ORDER BY m.rowid LIMIT 251",u.login,after,JSON.stringify([...byId.keys()]));
+      const more=page.length>250;
+      if(more)page.pop();
+      const items=page.map(r=>{
+        const m=JSON.parse(r.body), c=byId.get(r.chat);
+        const files=m.files?.length?m.files:(m.file?[m.file]:[]);
+        return {id:m.id,chat:r.chat,channel:c.channel,name:c.name,side:m.side,at:m.at,status:m.status,
+          author:m.side==="out"?(m.author||c.owner):c.name,text:r.edited_text??m.text,files:files.map(f=>f.name)};
+      });
+      return json(res,{items,next:more?page.at(-1).cursor:null});
+    }
     if (path === "/api/state" && method === "GET") {
       const entity = url.searchParams.get("entity"),
         eid = url.searchParams.get("entityId");
+      const related = new Set(many("SELECT chat FROM crm_chat_links WHERE owner=? AND lead=?",u.login,String(eid||url.searchParams.get("lead")||"")).map(r=>r.chat));
       const rows = many("SELECT * FROM chats ORDER BY rowid DESC")
         .filter((r) => canSee(u, r))
         .map((r) => ({ r, m: metadata(r) }))
         .filter(
           ({ m }) =>
             !entity ||
-            (entity === "leads" && m.leadId === eid) ||
+            (entity === "leads" && (m.leadId === eid || related.has(m.id))) ||
             (entity === "contacts" && m.contactId === eid),
         );
-      const chats = rows.map(({ m }) => ({
+      const compact = url.searchParams.get("view")==="inbox", feedOnly = url.searchParams.get("view")==="feed";
+      const activeId = url.searchParams.get("active") || rows.find(({m})=>related.has(m.id) || m.leadId===url.searchParams.get("lead"))?.m.id || rows[0]?.m.id;
+      const size = Math.max(100,Math.min(10000000,Number.parseInt(url.searchParams.get("limit")) || 100));
+      const chats = rows.map(({ m }) => {
+        const limit = feedOnly && url.searchParams.get("timeline")==="1" ? 0 : feedOnly ? 6 : compact ? (activeId===m.id ? size : 1) : -1;
+        const data = many(
+          "SELECT m.body,v.edited_text,v.reaction FROM messages m LEFT JOIN message_views v ON v.message=m.id AND v.login=? WHERE m.chat=? AND COALESCE(v.hidden,0)=0 ORDER BY json_extract(m.body,'$.at') DESC,m.rowid DESC LIMIT ?",
+          u.login,m.id,limit<=0?limit:limit+1);
+        const hasEarlier = limit>0 && data.length>limit;
+        if (hasEarlier) data.pop();
+        return {
         ...m,
-        messages: many(
-          `SELECT m.body,v.edited_text,v.reaction FROM messages m LEFT JOIN message_views v
-              ON v.message=m.id AND v.login=? WHERE m.chat=? AND COALESCE(v.hidden,0)=0 ORDER BY json_extract(m.body,'$.at'),m.rowid`,
-          u.login,
-          m.id,
-        ).map((r) => ({
-          ...JSON.parse(r.body),
+        hasEarlier,
+        searchMatch: url.searchParams.get("q") ? !!one("SELECT 1 FROM messages m LEFT JOIN message_views v ON v.message=m.id AND v.login=? WHERE m.chat=? AND COALESCE(v.hidden,0)=0 AND instr(lower(COALESCE(v.edited_text,json_extract(m.body,'$.text'))),lower(?))>0 LIMIT 1",u.login,m.id,trim(url.searchParams.get("q"),200)) : false,
+        messages: data.reverse().map(r => {
+          const original=JSON.parse(r.body);
+          if(original.card) {
+            const id=original.card.id;
+            original.card={kind:original.card.kind,title:original.card.title,href:"/share/"+id+(original.side==="note" ? "?access="+auth.fileLink(req,"card-"+id).split("download=")[1] : "")};
+          }
+          for (const file of [original.file,...(original.files||[])]) if(file) file.download=auth.fileLink(req,file.id);
+          return {...original,
           ...(r.edited_text !== null
             ? { text: r.edited_text, edited: true }
             : {}),
-          ...(r.reaction ? { reaction: r.reaction } : {}),
-        })),
-      }));
+          ...(r.reaction ? { reaction: r.reaction } : {})};
+        }),
+      }; });
       return json(res, {
-        chats,
+        uiBuild, selected:activeId, revision:revision(u.login), chats,
         templates: many("SELECT * FROM templates ORDER BY title"),
         sharedSms: smsService.overview(false),
         channels: [
@@ -717,30 +980,32 @@ async function route(req, res) {
       const f = one("SELECT * FROM files WHERE id=?", path.slice(11));
       if (!f || (!f.chat && f.owner !== u.login)) bad(404, "Файл недоступен");
       const row = f.chat ? visibleChat(f.chat, u) : null;
-      const bytes = f.bytes
-        ? Buffer.from(f.bytes)
-        : await fetchMedia(
-            row.channel,
-            f.remote,
-            JSON.parse(row.meta).accountId
-              ? legacyMedia(db, JSON.parse(row.meta).accountId)
-              : undefined,
-          );
+      const content=await attachmentSource(f,row,res);
       res.writeHead(200, {
-        "Content-Type": "application/octet-stream",
+        "Content-Type": f.mime || "application/octet-stream",
         "Content-Disposition":
           "attachment; filename*=UTF-8''" + encodeURIComponent(f.name),
         "Cache-Control": "no-store",
       });
-      return res.end(bytes);
+      if(Buffer.isBuffer(content))return res.end(content);
+      return pipeline(content,res);
     }
     requireWrite(u);
     if (path === "/api/files" && method === "POST") {
-      const bytes = await readBody(req, 8 * 1024 * 1024),
+      let bytes = await readBody(req, 8 * 1024 * 1024),
         name =
           trim(decodeURIComponent(req.headers["x-filename"] || "file"), 200) ||
           "file",
         fid = id();
+      const kind = req.headers["x-bechat-media"];
+      let duration;
+      if (kind === "voice") {
+        const normalized=await normalizeVoice(bytes); bytes=normalized.bytes; duration=normalized.duration;
+        name="Голосовое сообщение.ogg";
+      } else if (kind === "gif" || kind === "sticker") {
+        if (!/^GIF8[79]a$/.test(bytes.toString("ascii",0,6))) bad(400,"Ожидалась анимация GIF");
+        name=name.replace(/\.gif$/i,"")+".gif";
+      }
       run(
         "INSERT INTO files(id,owner,name,mime,size,bytes) VALUES(?,?,?,?,?,?)",
         fid,
@@ -750,19 +1015,26 @@ async function route(req, res) {
         bytes.length,
         bytes,
       );
-      return json(res, { id: fid, name, size: bytes.length });
+      return json(res, { id: fid, name, size: bytes.length, duration });
     }
     const v = parse(await readBody(req));
     if (path === "/api/chats" && method === "POST") {
       const channel = v.channel,
-        name = trim(v.name) || (channel === "SMS" ? trim(v.peer) : ""),
+        name = trim(v.name) || trim(v.peer),
         accountId = accounts.pick(u.login, String(channel));
       if (!name || (channel === "SMS" ? !smsService.active() : !accountId))
         bad(400, "Подключите канал и укажите получателя");
       let peer = trim(v.peer);
-      if (channel === "WhatsApp") peer = peer.replace(/[\\s()+-]/g, "");
-      if (channel !== "SMS") peer = await accounts.resolvePeer(accountId, peer);
-      const extra = {};
+      const phoneSearch = v.lookup === "phone" || ["WhatsApp","SMS"].includes(channel);
+      let recipientPhone = phoneSearch ? normalPhone(peer) : "";
+      if (phoneSearch && !recipientPhone) bad(400,"Укажите номер с кодом страны");
+      if (channel !== "SMS") {
+        const existing = recipientPhone && one("SELECT meta FROM chats WHERE owner=? AND channel=? AND json_extract(meta,'$.accountId')=? AND json_extract(meta,'$.phone')=?",u.login,channel,accountId,recipientPhone);
+        if (existing) peer = JSON.parse(existing.meta).remotePeer;
+        else if (channel==="ВКонтакте" && phoneSearch) bad(422,"Среди доступных контактов ВКонтакте нет собеседника с таким номером. Проверьте видимость номера в его профиле.");
+        else peer = await accounts.resolvePeer(accountId,recipientPhone || peer);
+      }
+      const extra = recipientPhone ? {phone:recipientPhone} : {};
       if (
         ["leads", "contacts"].includes(v.entity) &&
         /^[1-9]\d*$/.test(v.entityId)
@@ -793,6 +1065,10 @@ async function route(req, res) {
               accountId ? { ...extra, accountId, remotePeer: peer } : extra,
             );
       if (!canSee(u, row)) bad(403, "Контакт ведёт другой менеджер");
+      const previous = JSON.parse(row.meta);
+      if (extra.leadId && previous.leadId && String(previous.leadId)!==String(extra.leadId))
+        bad(409,"Этот диалог уже связан с другой сделкой");
+      if (recipientPhone) linkByPhone(row,recipientPhone);
       if (Object.keys(extra).length)
         saveMeta(row.id, { ...JSON.parse(row.meta), ...extra });
       return json(res, { id: row.id });
@@ -941,14 +1217,15 @@ async function route(req, res) {
       "window.BECHAT_CONFIG=" +
         JSON.stringify({
           crmOrigin: authSettings.crm,
+          accountId:authSettings.tenant,
           serviceOrigin: authSettings.origin,
-          version: "1.1.0",
+          version: "1.1.7",
         }) +
         ";",
     );
   }
   if (
-    path !== "/" &&
+    path !== "/" && path!=="/assets/animated-emoji.json" &&
     !/^\/(?:[a-z][\w-]*\.(?:html|css|js|svg)|assets\/[\w.-]+\.(?:jpg|webp|pdf|js|bcmap|pfb|ttf|wasm|icc|txt))$/.test(
       path,
     )
@@ -961,13 +1238,23 @@ async function route(req, res) {
   } catch {
     bad(404, "Файл не найден");
   }
+  if(file===resolve(dist,"index.html")) {
+    data=data.toString().replace("<html ", '<html data-build="'+uiBuild+'" ')
+      .replace(/(src|href)="([\w-]+\.(?:js|css))"/g, (all,key,name)=>key+'="'+name+'?build='+uiBuild+'"');
+  }
   res.writeHead(200, {
     "Content-Type": mime[extname(file)] || "application/octet-stream",
+    "Cache-Control": path.startsWith("/assets/")?"private, max-age=86400":"no-cache",
   });
   res.end(method === "HEAD" ? undefined : data);
 }
+const serveCard=cardPages(db,{origin:authSettings.origin,readBody,notify:signal,canWrite:requireWrite,
+  privateUser:(id,url,chat)=>{const u=auth.fileUser("card-"+id,url.searchParams.get("access"));visibleChat(chat,u);return u;}});
 createServer((req, res) =>
   route(req, res).catch((e) => {
+    if (req.url?.startsWith("/api/files/")) console.warn("File retrieval:",e.http||500, e.http ? e.message : [e.name,e.cause?.code,String(e.stack||"").match(/main\.mjs:(\d+):\d+/)?.[1]]);
+    if (req.url?.split("?")[0]==="/auth/widget" && e.http)
+      console.warn("Widget SSO:",e.http,e.message);
     if (!res.headersSent)
       json(
         res,

@@ -117,8 +117,17 @@ test("real HTTP server authenticates CRM employees in widget, web and iOS and is
     );
   const exchange = (ticket, verifier, client) =>
     req("/auth/exchange", "POST", { ticket, verifier, client });
-  assert.equal((await ok("/healthz")).version, "1.1.0");
+  assert.equal((await ok("/healthz")).version, "1.1.7");
   assert.equal((await req("/api/state")).status, 401);
+  assert.equal((await req("/api/deal-timeline?lead=1")).status,401);
+  assert.equal((await req("/api/voice-text/file","POST",{})).status,401);
+  assert.ok((await ok("/assets/animated-emoji.json")).length>600);
+  const html=await (await req("/")).text();
+  assert.match(html,/data-build="[a-f0-9]+"/);
+  for(const name of ["voice-player","attachments-menu","composer-media"]){
+    assert.ok(html.includes(name+".js?build="));
+    assert.equal((await req("/"+name+".js")).status,200);
+  }
   assert.notEqual(
     (await req("/api/login", "POST", { login: "admin", password: "anything" }))
       .status,
@@ -215,7 +224,43 @@ test("real HTTP server authenticates CRM employees in widget, web and iOS and is
       null,
       Buffer.from("ok"),
     );
+  seed.prepare("UPDATE chats SET meta=json_set(meta,'$.phone','+79990000001') WHERE id=?").run(privateChat);
+  const insertMessage=seed.prepare("INSERT INTO messages VALUES(?,?,?,?)");
+  const days=["2026-11-17T10:15:03.000Z","2026-11-13T13:12:55.000Z"];
+  for(let i=0;i<255;i++){
+    const id="fixture-"+i;
+    insertMessage.run(id,privateChat,null,JSON.stringify({id,side:i===254?"note":"in",at:days[i%2],text:"fixture"}));
+  }
   seed.close();
+  const proof2=rand(), cachedClaims=claims(33);
+  await widget(33,rand(),cachedClaims);
+  const resumeData=await ok("/auth/widget","POST",{challenge:digest(proof2),allowResume:true},{"X-Auth-Token":jwt(cachedClaims),Origin:crm});
+  const resumeBody={challenge:digest(proof2),assertion:resumeData.ticket};
+  assert.equal((await req("/auth/widget-resume","POST",resumeBody,{Origin:origin})).status,401);
+  assert.equal((await req("/auth/widget-resume","POST",resumeBody,{Origin:origin,...auth(accounts[31])})).status,403);
+  const resumed=await ok("/auth/widget-resume","POST",resumeBody,{Origin:origin,...auth(accounts[33])});
+  assert.equal((await exchange(resumed.ticket,proof2,"widget")).status,200);
+  const next=await ok("/auth/widget-ticket","POST",{uid:33,challenge:digest(proof2)},{Origin:origin,...auth(accounts[33])});
+  assert.equal((await exchange(next.ticket,rand(),"widget")).status,401);
+  assert.equal((await exchange(next.ticket,proof2,"widget")).status,200);
+  await ok("/api/contact-photos","POST",{lead:"999",contacts:[{id:"321",phones:["8 (999) 000-00-01"]}]},auth(accounts[33]));
+  assert.equal((await ok("/api/state?entity=leads&entityId=999","GET",undefined,auth(accounts[33]))).chats[0].id,privateChat);
+  assert.equal((await ok("/api/state?entity=leads&entityId=999","GET",undefined,auth(accounts[31]))).chats.length,0);
+  const page=after=>ok("/api/deal-timeline?lead=999&after="+after,"GET",undefined,auth(accounts[33]));
+  const first=await page(0), second=await page(first.next);
+  assert.equal(first.items.length,250);
+  assert.equal(second.items.length,4);
+  assert.equal(second.next,null);
+  assert.equal(new Set([...first.items,...second.items].map(m=>m.id)).size,254);
+  assert.deepEqual(first.items.slice(0,2).map(m=>m.at),days);
+  assert.equal((await ok("/api/deal-timeline?lead=999","GET",undefined,auth(accounts[31]))).items.length,0);
+  const linkChat = uid => req("/api/deal-dialogs", "POST", {chat:privateChat,lead:"456"}, auth(accounts[uid]));
+  assert.equal((await linkChat(31)).status, 404);
+  assert.equal((await ok("/api/deal-dialogs","GET",undefined,auth(accounts[33])))[0].id, privateChat);
+  assert.equal((await linkChat(33)).status, 200);
+  assert.equal((await ok("/api/state?entity=leads&entityId=456","GET",undefined,auth(accounts[33]))).chats[0].id, privateChat);
+  assert.equal((await ok("/api/state?entity=leads&entityId=457","GET",undefined,auth(accounts[33]))).chats.length, 0);
+  assert.equal((await ok("/api/state?entity=leads&entityId=456","GET",undefined,auth(accounts[31]))).chats.length, 0);
   for (const uid of [31, 32, 33, 34]) {
     const view = await ok("/api/state", "GET", undefined, auth(accounts[uid]));
     assert.equal(

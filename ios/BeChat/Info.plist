@@ -58,6 +58,8 @@
 		<string>UIInterfaceOrientationLandscapeLeft</string>
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Записать голосовое сообщение в выбранный диалог BeChat.</string>
 	<key>NSCameraUsageDescription</key>
 	<string>Сфотографировать вложение для сообщения.</string>
 	<key>NSPhotoLibraryUsageDescription</key>

@@ -165,10 +165,13 @@ async function crmJson(url, opt = {}) {
 export function createAuth(db, cfg, { readBody, json }) {
   db.exec(`CREATE TABLE IF NOT EXISTS amo_staff(uid TEXT PRIMARY KEY,login TEXT NOT NULL UNIQUE,name TEXT NOT NULL);
  CREATE TABLE IF NOT EXISTS auth_used(jti TEXT PRIMARY KEY,until INTEGER NOT NULL);
+ CREATE TABLE IF NOT EXISTS widget_assertion_audit(key TEXT PRIMARY KEY,digest TEXT,issued INTEGER,until INTEGER);
  CREATE TABLE IF NOT EXISTS auth_pending(state TEXT PRIMARY KEY, lane TEXT NOT NULL, proof TEXT NOT NULL, browser TEXT NOT NULL, nonce TEXT NOT NULL, until INTEGER NOT NULL);
  CREATE TABLE IF NOT EXISTS auth_tickets(hash TEXT PRIMARY KEY, uid TEXT NOT NULL, lane TEXT NOT NULL, proof TEXT NOT NULL, until INTEGER NOT NULL);
  CREATE TABLE IF NOT EXISTS auth_sessions(hash TEXT PRIMARY KEY, uid TEXT NOT NULL, until INTEGER NOT NULL);
  CREATE INDEX IF NOT EXISTS auth_sessions_exp ON auth_sessions(until);`);
+  if(!db.prepare("PRAGMA table_info(auth_tickets)").all().some(x=>x.name==="session_until"))
+    db.exec("ALTER TABLE auth_tickets ADD COLUMN session_until INTEGER");
   const q = (sql) => db.prepare(sql);
   const loginFor = (id) =>
     Object.hasOwn(cfg.aliases, String(id))
@@ -195,19 +198,34 @@ export function createAuth(db, cfg, { readBody, json }) {
     const row =
       bearer &&
       q(
-        "SELECT s.uid,u.login,u.name FROM auth_sessions s JOIN amo_staff u ON u.uid=s.uid WHERE s.hash=? AND s.until>?",
+        "SELECT s.uid,s.until,u.login,u.name FROM auth_sessions s JOIN amo_staff u ON u.uid=s.uid WHERE s.hash=? AND s.until>?",
       ).get(digest(bearer), seconds());
     if (!row) deny(401, "Требуется вход через amoCRM");
     return { ...row, role: cfg.roles.get(row.uid) || "manager" };
   }
-  function ticket(uid, lane, proof) {
+  function fileLink(req, file) {
+    const key=digest(req.headers.authorization.slice(7));
+    const until=(Math.floor(seconds()/300)+2)*300;
+    const proof=createHmac("sha256",cfg.clientSecret).update(["file",file,key,until].join("|")).digest("base64url");
+    return "/api/files/"+encodeURIComponent(file)+"?download="+[key,until,proof].join(".");
+  }
+  function fileUser(file, grant) {
+    const [key,until,signature,...extra]=String(grant).split(".");
+    const expected=createHmac("sha256",cfg.clientSecret).update(["file",file,key,until].join("|")).digest("base64url");
+    if(extra.length || !challengeFormat.test(key) || !/^\d{1,12}$/.test(until) || Number(until)<=seconds() ||
+       Number(until)>seconds()+600 || !same(signature,expected)) deny(403,"Ссылка истекла. Откройте файл из переписки ещё раз");
+    const s=q("SELECT s.uid,u.login,u.name FROM auth_sessions s JOIN amo_staff u ON u.uid=s.uid WHERE s.hash=? AND s.until>?").get(key,seconds());
+    if(!s) deny(401,"Сессия истекла");
+    return {...s,role:cfg.roles.get(s.uid)||"manager"};
+  }
+  function ticket(uid, lane, proof, ceiling=null) {
     const val = secret();
-    q("INSERT INTO auth_tickets VALUES(?,?,?,?,?)").run(
+    q("INSERT INTO auth_tickets VALUES(?,?,?,?,?,?)").run(
       digest(val),
       uid,
       lane,
       proof,
-      seconds() + 90,
+      seconds() + 90, ceiling,
     );
     return val;
   }
@@ -237,6 +255,7 @@ export function createAuth(db, cfg, { readBody, json }) {
   function sweep() {
     for (const table of [
       "auth_used",
+      "widget_assertion_audit",
       "auth_pending",
       "auth_tickets",
       "auth_sessions",
@@ -249,6 +268,27 @@ export function createAuth(db, cfg, { readBody, json }) {
     const path = url.pathname,
       method = req.method,
       params = url.searchParams;
+    if (path === "/auth/widget-resume" && method==="POST") {
+      if (req.headers.origin !== cfg.origin) deny(403,"Недопустимый источник входа");
+      const {assertion,challenge}=await read(req);
+      if (!challengeFormat.test(challenge||"") || typeof assertion!=="string") deny(400,"Сессия требует подтверждения");
+      const pieces=assertion.split(".");
+      const [mode,uid,expires,proof,mac]=pieces;
+      const sig=createHmac("sha256",cfg.clientSecret).update(pieces.slice(0,4).join(".")).digest("base64url");
+      if(pieces.length!==5 || mode!=="resume" || !numberId(uid) || !/^\d{1,12}$/.test(expires) ||
+        Number(expires)<=seconds() || proof!==challenge || !same(sig,mac)) deny(403,"Подтверждение недействительно");
+      const existing=req.headers.authorization || "Bearer "+browserCookie(req,"__Host-bechat-embed");
+      const who=current({headers:{authorization:existing}});
+      if(who.uid!==uid) deny(403,"В CRM выбран другой сотрудник");
+      return json(res,{ticket:ticket(uid,"widget",proof,who.until)});
+    }
+    if (path === "/auth/widget-ticket" && method==="POST") {
+      if (req.headers.origin !== cfg.origin) deny(403,"Недопустимый источник входа");
+      const user=current(req);
+      const {challenge,uid}=await read(req);
+      if (String(uid)!==String(user.uid) || !challengeFormat.test(challenge||"")) deny(403,"Проверьте активного сотрудника amoCRM");
+      return json(res,{ticket:ticket(user.uid,"widget",challenge,user.until)});
+    }
     if (path === "/auth/widget") {
       if (req.headers.origin !== cfg.crm)
         deny(403, "Откройте виджет из своего аккаунта amoCRM");
@@ -265,14 +305,25 @@ export function createAuth(db, cfg, { readBody, json }) {
         return;
       }
       if (method !== "POST") deny(405, "Требуется POST");
-      const { challenge } = await read(req);
+      const { challenge,allowResume } = await read(req);
       if (!challengeFormat.test(challenge || "")) deny(400, "Обновите виджет");
       const p = widgetClaims(req.headers["x-auth-token"], cfg);
+      const sourceKey=digest([p.account_id,p.user_id,p.client_uuid,p.jti].join("/"));
+      const fingerprint=digest(req.headers["x-auth-token"]);
+      const previous=q("SELECT digest,issued FROM widget_assertion_audit WHERE key=?").get(sourceKey);
+      if (previous) console.info("Widget confirmation:", previous.digest===fingerprint?"identical":"new signature",previous.issued===p.iat?"same issue time":"updated issue time");
+      q("INSERT OR REPLACE INTO widget_assertion_audit VALUES(?,?,?,?)").run(sourceKey,fingerprint,p.iat,p.exp);
       if (
         !q("INSERT OR IGNORE INTO auth_used VALUES(?,?)").run(p.jti, p.exp)
           .changes
-      )
+      ) {
+        if (allowResume===true) {
+          const value=["resume",p.user_id,Math.min(p.exp,seconds()+60),challenge].join(".");
+          const sig=createHmac("sha256",cfg.clientSecret).update(value).digest("base64url");
+          return json(res,{ticket:value+"."+sig});
+        }
         deny(401, "Подтверждение уже использовано. Откройте виджет ещё раз");
+      }
       const uid = String(p.user_id);
       principal(uid);
       json(res, { ticket: ticket(uid, "widget", challenge) });
@@ -409,14 +460,18 @@ export function createAuth(db, cfg, { readBody, json }) {
         !["ios", "web", "widget"].includes(client)
       )
         deny(400, "Неполная попытка входа");
-      const token = secret(),
-        until = seconds() + 8 * 3600;
+      const token = secret();
+      let until = seconds() + 8 * 3600;
       db.exec("BEGIN IMMEDIATE");
       try {
         const row = q(
-          "DELETE FROM auth_tickets WHERE hash=? AND proof=? AND lane=? AND until>? RETURNING uid",
+          "DELETE FROM auth_tickets WHERE hash=? AND proof=? AND lane=? AND until>? RETURNING uid,session_until",
         ).get(digest(code), digest(verifier), client, seconds());
         if (!row) deny(401, "Разрешение истекло. Повторите вход");
+        if (row.session_until!==null) {
+          until=Math.min(until,row.session_until);
+          if(until<=seconds()) deny(401,"Сессия amoCRM истекла");
+        }
         q("INSERT INTO auth_sessions VALUES(?,?,?)").run(
           digest(token),
           row.uid,
@@ -427,6 +482,7 @@ export function createAuth(db, cfg, { readBody, json }) {
         db.exec("ROLLBACK");
         throw e;
       }
+      if (client==="widget") res.setHeader("Set-Cookie","__Host-bechat-embed="+token+"; Path=/; Secure; HttpOnly; SameSite=None; Partitioned; Max-Age="+Math.max(0,until-seconds()));
       json(res, { token, expiresAt: new Date(until * 1000).toISOString() });
       return;
     }
@@ -434,7 +490,7 @@ export function createAuth(db, cfg, { readBody, json }) {
   }
   return {
     route,
-    current,
+    current,fileLink,fileUser,
     logout: closeSession,
     nameFor,
     firstOwner: () => loginFor(cfg.inbox),
