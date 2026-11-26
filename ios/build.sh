@@ -12,7 +12,7 @@ xcodebuild -project "$root/ios/BeChat.xcodeproj" -scheme BeChat -configuration R
 app="$out/DerivedData/Build/Products/Release-iphoneos/BeChat.app"
 test -f "$app/BeChat" && test -f "$app/Assets.car"
 /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Info.plist" | grep -Fxq ru.onbequick.bechat
-xcrun lipo -verify_arch arm64 "$app/BeChat"
+xcrun lipo "$app/BeChat" -verify_arch arm64
 xcrun vtool -show-build "$app/BeChat" > "$out/macho-platform.txt"
 grep -Eq 'platform[[:space:]]+IOS$' "$out/macho-platform.txt"
 mkdir "$stage/Payload"
