@@ -1,5 +1,6 @@
 import { createAuth, authConfig } from "./auth.mjs";
-import { createAccounts } from "./accounts.mjs";
+import { legacyMedia } from "./accounts.mjs";
+import { createPersonal } from "./personal.mjs";
 import { createSmsService } from "./sms.mjs";
 import smsCore from "../dist/sms-core.js";
 import { createServer } from "node:http";
@@ -73,7 +74,9 @@ const trim = (s, n = 400) =>
     .trim()
     .slice(0, n);
 const auth = createAuth(db, authSettings, { readBody, json });
-const accounts = createAccounts(db);
+const accounts = createPersonal(db, (value) =>
+  transaction(() => ingest(value)),
+);
 const roleName = {
   founder: "Учредитель",
   admin: "Администратор",
@@ -236,11 +239,38 @@ function ingest(v) {
       v.accountId ? { accountId: v.accountId, remotePeer: v.remotePeer } : {},
     ),
     meta = JSON.parse(row.meta);
-  meta.unanswered = (meta.unanswered || 0) + 1;
+  if (
+    v.accountId &&
+    one("SELECT id FROM messages WHERE chat=? AND remote=?", row.id, v.remoteId)
+  )
+    return;
+  if (!v.outgoing && !v.history) meta.unanswered = (meta.unanswered || 0) + 1;
   meta.archived = false;
   if (v.username) meta.username = v.username;
   saveMeta(row.id, meta);
-  const m = { id: mid, side: "in", text: v.text || "", at: v.at };
+  const m = {
+    id: mid,
+    side: v.outgoing ? "out" : "in",
+    text: v.text || "",
+    at: v.at,
+    ...(v.outgoing ? { status: "sent" } : {}),
+  };
+  if (v.directFile) {
+    const f = v.directFile,
+      fid = id();
+    run(
+      "INSERT INTO files VALUES(?,?,?,?,?,?,?,?)",
+      fid,
+      row.owner,
+      row.id,
+      f.name,
+      mime[extname(f.name).toLowerCase()] || "application/octet-stream",
+      f.bytes.length,
+      null,
+      f.bytes,
+    );
+    m.file = { id: fid, name: f.name, size: f.bytes.length };
+  }
   if (v.media) {
     const f = v.media,
       fid = id();
@@ -265,7 +295,7 @@ function ingest(v) {
     m.file = f;
   }
   put(row.id, m, v.remoteId);
-  job(mid, scopePath, importMessage(metadata(row), m));
+  if (!v.accountId) job(mid, scopePath, importMessage(metadata(row), m));
   return true;
 }
 const smsService = createSmsService(db, {
@@ -390,7 +420,28 @@ async function sendMessage(u, row, input, amoId = "") {
       );
       if (!later) meta.unanswered = 0;
       saveMeta(row.id, meta);
-      if (!amoId) job(m.id, scopePath, importMessage(metadata(now), m));
+      if (!amoId && !meta.accountId)
+        job(m.id, scopePath, importMessage(metadata(now), m));
+      if (meta.accountId && remote) {
+        const echoId = createHash("sha256")
+          .update(JSON.stringify([row.channel, row.peer, String(remote)]))
+          .digest("hex");
+        if (echoId !== m.id) {
+          run(
+            "DELETE FROM message_views WHERE message=? AND EXISTS(SELECT 1 FROM messages WHERE id=? AND chat=? AND remote=?)",
+            echoId,
+            echoId,
+            row.id,
+            String(remote),
+          );
+          run(
+            "DELETE FROM messages WHERE id=? AND chat=? AND remote=?",
+            echoId,
+            row.id,
+            String(remote),
+          );
+        }
+      }
       if (row.channel === "WhatsApp") {
         const account = JSON.parse(row.meta).accountId;
         const s = one(
@@ -489,18 +540,15 @@ async function route(req, res) {
       "Content-Security-Policy",
       "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self'",
     );
-  const personalHook = /^\/hooks\/account\/([a-f0-9-]{36})$/.exec(path);
-  if (personalHook && ["GET", "POST"].includes(method)) {
-    const { events, text } = accounts.hook(
-      personalHook[1],
-      method,
-      url.searchParams,
-      req.headers,
-      method === "POST" ? await readBody(req) : null,
+  if (path === "/personal/vk/callback" && method === "GET") {
+    await accounts.vkCallback(url.searchParams);
+    res.writeHead(200, {
+      "Content-Type": "text/plain; charset=utf-8",
+      "Cache-Control": "no-store",
+    });
+    return res.end(
+      "Подтверждение VK ID получено. Вернитесь в окно BeChat, чтобы проверить подключение.",
     );
-    transaction(() => events.forEach(ingest));
-    res.writeHead(200, { "Content-Type": "text/plain" });
-    return res.end(text);
   }
   if (path.startsWith("/hooks/sms/") && method === "POST") {
     const [, , , rid, proof] = path.split("/");
@@ -578,6 +626,8 @@ async function route(req, res) {
     return json(res, { ok: true });
   }
   if (path.startsWith("/auth/")) return auth.route(req, res, url);
+  if (path === "/livez" && method === "GET")
+    return json(res, { service: "BeChat", status: "live" });
   if (path === "/healthz" && method === "GET") {
     if (!one("SELECT 1 AS healthy")?.healthy) bad(503, "База недоступна");
     return json(res, { service: "BeChat", version: "1.1.0", status: "ok" });
@@ -594,7 +644,12 @@ async function route(req, res) {
       if (method === "POST") {
         const input = parse(await readBody(req, 16384));
         if (input.op === "disconnect")
-          return json(res, accounts.remove(u.login, input.id));
+          return json(res, await accounts.remove(u.login, input.id));
+        if (input.op === "answer")
+          return json(
+            res,
+            await accounts.answer(u.login, input.channel, input.answer),
+          );
         if (input.op === "connect") {
           await accounts.connect(u, input);
           return json(res, accounts.list(u.login));
@@ -622,7 +677,7 @@ async function route(req, res) {
         ...m,
         messages: many(
           `SELECT m.body,v.edited_text,v.reaction FROM messages m LEFT JOIN message_views v
-              ON v.message=m.id AND v.login=? WHERE m.chat=? AND COALESCE(v.hidden,0)=0 ORDER BY m.rowid`,
+              ON v.message=m.id AND v.login=? WHERE m.chat=? AND COALESCE(v.hidden,0)=0 ORDER BY json_extract(m.body,'$.at'),m.rowid`,
           u.login,
           m.id,
         ).map((r) => ({
@@ -640,7 +695,6 @@ async function route(req, res) {
         channels: [
           ...new Set([
             ...accounts.available(u.login),
-            ...Object.keys(configured).filter((k) => configured[k]),
             ...(smsService.active() ? ["SMS"] : []),
           ]),
         ],
@@ -669,7 +723,7 @@ async function route(req, res) {
             row.channel,
             f.remote,
             JSON.parse(row.meta).accountId
-              ? accounts.media(JSON.parse(row.meta).accountId)
+              ? legacyMedia(db, JSON.parse(row.meta).accountId)
               : undefined,
           );
       res.writeHead(200, {
@@ -701,22 +755,13 @@ async function route(req, res) {
     const v = parse(await readBody(req));
     if (path === "/api/chats" && method === "POST") {
       const channel = v.channel,
-        peer = trim(v.peer).replace(
-          channel === "WhatsApp" ? /[\s()+-]/g : /\s/g,
-          "",
-        ),
-        name = trim(v.name) || (channel === "SMS" ? peer : ""),
+        name = trim(v.name) || (channel === "SMS" ? trim(v.peer) : ""),
         accountId = accounts.pick(u.login, String(channel));
-      if (
-        (channel === "SMS"
-          ? !smsService.active()
-          : !accountId &&
-            (!Object.hasOwn(configured, channel) || !configured[channel])) ||
-        !name ||
-        (channel !== "SMS" &&
-          !(channel !== "WhatsApp" ? /^-?\d{1,20}$/ : /^\d{7,16}$/).test(peer))
-      )
-        bad(400, "Проверьте канал и ID получателя");
+      if (!name || (channel === "SMS" ? !smsService.active() : !accountId))
+        bad(400, "Подключите канал и укажите получателя");
+      let peer = trim(v.peer);
+      if (channel === "WhatsApp") peer = peer.replace(/[\\s()+-]/g, "");
+      if (channel !== "SMS") peer = await accounts.resolvePeer(accountId, peer);
       const extra = {};
       if (
         ["leads", "contacts"].includes(v.entity) &&

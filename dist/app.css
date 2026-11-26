@@ -1535,3 +1535,5 @@ form[data-form="new"] .primary:active {
 }
 
 .identity-form p{line-height:1.55;margin:12px 0 16px}.identity-form #auth-status:empty{display:none}.operator svg{width:21px;height:21px;color:var(--accent)}
+
+.pair-code{margin:16px 0;text-align:center}.pair-code img{max-width:100%;width:224px;height:auto;background:white;border-radius:10px}.pair-code figcaption,.pair-form p,.pair-notice{font-size:14px;line-height:1.5}.pair-code figcaption{margin:12px 0}.pair-choice{display:flex;align-items:center;gap:8px;margin:14px 0 20px;font-size:13px}.pair-link{display:inline-block;text-decoration:none;margin:2px 0 16px}.pair-form{margin-bottom:16px}.pair-choice input{width:auto}

@@ -1,5 +1,8 @@
 **
 !package.json
+!personal/
+!personal/*.py
+!personal/requirements.txt
 !server/
 !server/**
 server/user.mjs

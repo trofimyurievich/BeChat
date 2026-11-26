@@ -1,9 +1,9 @@
 "use strict";
 const messengerTypes = {
-  Telegram: "Бот Telegram",
-  WhatsApp: "Номер WhatsApp Business",
-  MAX: "Бот MAX",
-  ВКонтакте: "Сообщество ВКонтакте",
+  Telegram: "Личный профиль Telegram",
+  WhatsApp: "Личный номер WhatsApp",
+  MAX: "Личный профиль MAX",
+  ВКонтакте: "Личная страница ВКонтакте",
 };
 function isFounder() {
   return profile.founder === true;
@@ -72,97 +72,147 @@ async function openPersonalAccounts() {
   const rows = await api("accounts");
   modal(
     "Мои мессенджеры",
-    Object.entries(messengerTypes)
-      .map(([channel, desc]) => {
-        const row = rows.find((a) => a.channel === channel);
-        return actionRow(
-          "account:" + channel,
-          channel,
-          row
-            ? row.label +
-                " · " +
-                (row.ready ? "Подключён" : "Ожидает настройки")
-            : desc,
-          chIcon(channel),
-        );
-      })
+    rows
+      .map((a) =>
+        actionRow(
+          "account:" + a.channel,
+          a.channel,
+          a.id
+            ? (a.label || messengerTypes[a.channel]) + " · " + a.description
+            : messengerTypes[a.channel],
+          chIcon(a.channel),
+        ),
+      )
       .join("") + settingsNav(),
   );
 }
-async function openAccount(channel) {
+const pairingHints = {
+  Telegram:
+    "В Telegram на телефоне откройте «Настройки → Устройства → Подключить устройство» и отсканируйте код.",
+  WhatsApp:
+    "В WhatsApp на телефоне откройте «Связанные устройства → Привязка устройства» и отсканируйте код.",
+  MAX: "На телефоне откройте сканер QR в MAX и подтвердите вход в свой профиль.",
+  ВКонтакте:
+    "Войдите на странице VK ID и разрешите BeChat доступ к сообщениям своей страницы.",
+};
+let pairingTimer,
+  pairingVersion = 0;
+async function openAccount(channel, update = false) {
   if (!Object.hasOwn(messengerTypes, channel)) return;
-  const rows = await api("accounts"),
-    a = rows.find((x) => x.channel === channel);
-  const manual = ["WhatsApp", "ВКонтакте"].includes(channel);
-  const technical =
-    a && manual
-      ? '<details class="setting-detail" ' +
-        (a.ready ? "" : "open") +
-        '><summary>Приём сообщений</summary><p class="minor">' +
-        (channel === "WhatsApp"
-          ? "В настройках Webhooks Meta укажите Callback URL и Verify token. Подпишите приложение на messages и на нужный WhatsApp Business Account."
-          : "В Callback API сообщества добавьте адрес сервера и секретный ключ, подтвердите адрес и включите событие message_new.") +
-        "</p><p>Адрес</p><code>" +
-        esc(a.callback) +
-        "</code><p>" +
-        (channel === "WhatsApp" ? "Verify token" : "Секретный ключ") +
-        "</p><code>" +
-        esc(a.verify) +
-        "</code></details>"
-      : "";
-  const connected = a
-    ? '<div class="modalrow"><b>' +
-      esc(a.label) +
-      "</b><small>" +
-      esc(a.ready ? "Подключён" : "Ожидает настройки") +
-      "</small></div>" +
-      technical
-    : "";
-  const formBody =
-    field("Токен доступа", "token", "", "password", true) +
-    (channel === "WhatsApp"
-      ? field("ID номера в Meta", "phoneId", "", "text", true) +
-        field("Версия Graph API, например v23.0", "version", "", "text", true) +
-        field("App Secret приложения Meta", "appSecret", "", "password", true)
-      : "") +
-    (["Telegram", "MAX"].includes(channel)
-      ? '<p class="minor">BeChat зарегистрирует свой адрес для входящих событий этого бота. Для Telegram это заменит прежний webhook.</p>'
-      : "");
-  modal(
-    channel,
-    connected +
-      (editable() && (!a || !a.ready)
-        ? '<form autocomplete="off">' +
-          formBody +
-          '<button type="submit" class="primary">' +
-          (a ? "Повторить подключение" : "Подключить") +
-          "</button></form>"
-        : "") +
-      (a && editable()
-        ? actionRow(
-            "disconnect:" + channel,
-            "Отключить аккаунт",
-            "Сохранить историю переписки",
-            "close",
-          )
-        : "") +
-      actionRow("accounts", "Мои мессенджеры", "Все подключения", "network"),
+  clearTimeout(pairingTimer);
+  const pageId = "personal-" + channel,
+    version = ++pairingVersion;
+  const a = (await api("accounts")).find((row) => row.channel === channel);
+  if (
+    !a ||
+    version !== pairingVersion ||
+    (update && (activeModal !== pageId || !$("#modal").open))
+  )
+    return;
+  const back = actionRow(
+    "accounts",
+    "Мои мессенджеры",
+    "Все подключения",
+    "network",
   );
+  const disconnect =
+    a.id && editable()
+      ? actionRow(
+          "disconnect:" + channel,
+          a.ready ? "Отключить аккаунт" : "Отменить подключение",
+          "Завершить сеанс BeChat",
+          "close",
+        )
+      : "";
+  const intro =
+    '<p class="minor">' +
+    esc(messengerTypes[channel]) +
+    " · Подключение с сервера BeChat</p>";
+  let body = "";
+  if (a.ready)
+    body =
+      '<div class="modalrow"><b>' +
+      esc(a.label) +
+      "</b><small>Подключён</small></div>";
+  else if (a.requirement)
+    body = '<p class="pair-notice">' + esc(a.requirement) + "</p>";
+  else if (
+    a.status === "new" ||
+    a.status === "failed" ||
+    a.status === "offline"
+  ) {
+    body =
+      (a.status === "new"
+        ? ""
+        : '<p role="status" class="minor">' + esc(a.description) + "</p>") +
+      (editable()
+        ? '<form class="pair-form"><p>' +
+          esc(pairingHints[channel]) +
+          '</p><label class="pair-choice"><input type="checkbox" name="history">Добавить недавнюю историю личных диалогов</label><button class="primary" type="submit">' +
+          (a.status === "new"
+            ? "Подключить личный аккаунт"
+            : "Повторить подключение") +
+          "</button></form>"
+        : "");
+  } else if (a.status === "password") {
+    if (update && $("#pair-password")) return;
+    body =
+      '<form><label class="formfield"><span>Пароль двухэтапной проверки Telegram</span><input id="pair-password" name="answer" type="password" autocomplete="off" required></label><button class="primary" type="submit">Подтвердить</button></form>';
+  } else if (a.authorize) {
+    body =
+      "<p>" +
+      esc(pairingHints[channel]) +
+      '</p><a class="primary pair-link" href="' +
+      esc(a.authorize) +
+      '" rel="noopener noreferrer" target="_blank">Продолжить в VK ID</a>';
+  } else if (a.qr) {
+    body =
+      '<figure class="pair-code"><img src="' +
+      esc(a.qr) +
+      '" width="224" height="224" alt="QR для подключения личного аккаунта"><figcaption>' +
+      esc(pairingHints[channel]) +
+      "</figcaption></figure>";
+  } else
+    body =
+      '<p role="status" class="pair-notice">' + esc(a.description) + "</p>";
+  modal(channel, intro + body + disconnect + back, pageId);
   if ($("#modalbody form"))
     bindSettingsForm(async (values) => {
-      {
-        await api("accounts", "POST", { ...values, op: "connect", channel });
-        await refresh();
-      }
+      if (a.status === "password")
+        await api("accounts", "POST", {
+          op: "answer",
+          channel,
+          answer: values.answer,
+        });
+      else
+        await api("accounts", "POST", {
+          op: "connect",
+          channel,
+          history: values.history === "on",
+        });
       await openAccount(channel);
     });
+  if (a.ready && update) {
+    await refresh();
+    render();
+    return;
+  }
+  if (["starting", "qr", "oauth"].includes(a.status))
+    pairingTimer = setTimeout(() => {
+      if ($("#modal").open && activeModal === pageId)
+        guarded(() => openAccount(channel, true));
+    }, 1500);
 }
 document.addEventListener("click", (e) => {
   const b = e.target.closest("[data-setting]");
   if (!b) return;
   guarded(async () => {
     const [op, channel] = b.dataset.setting.split(":");
-    if (op === "accounts") return openPersonalAccounts();
+    if (op === "accounts") {
+      ++pairingVersion;
+      clearTimeout(pairingTimer);
+      return openPersonalAccounts();
+    }
     if (op === "account") return openAccount(channel);
     if (op === "disconnect") {
       const a = (await api("accounts")).find((x) => x.channel === channel);

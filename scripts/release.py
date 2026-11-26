@@ -14,6 +14,9 @@ def bundle(items):
     stream = io.BytesIO()
     with ZipFile(stream, "w", compression=ZIP_DEFLATED) as archive:
         for name, data in sorted(items):
+            if (Path(name).suffix in {".md", ".txt", ".html", ".css", ".js", ".mjs", ".json", ".svg", ".sh", ".py", ".yaml", ".yml"}
+                    or Path(name).name in {".env.example", ".dockerignore", "Dockerfile", "Caddyfile"}):
+                data = data.replace(b"\r\n", b"\n")
             info = ZipInfo(name, (2026, 1, 1, 0, 0, 0))
             info.create_system = 3
             info.external_attr = (0o100755 if name.endswith(".sh") else 0o100644) << 16
@@ -23,6 +26,8 @@ def bundle(items):
 def files(directory):
     for path in (ROOT / directory).rglob("*"):
         if not path.is_file():
+            continue
+        if directory == "personal" and (path.parent != ROOT / directory or path.suffix not in (".py", ".txt")):
             continue
         if directory == "dist" and (path.name.startswith("portrait-") or path.name in ("orbit.pdf", "orbit.jpg")):
             continue
@@ -37,7 +42,7 @@ def main():
     output.mkdir(parents=True, exist_ok=True)
     widget = bundle((name.removeprefix("widget/"), data) for name, data in files("widget"))
     entries = [(name, (ROOT / name).read_bytes()) for name in TOP]
-    for directory in ("server", "dist", "deploy", "docs", "tests"):
+    for directory in ("server", "dist", "deploy", "docs", "tests", "personal"):
         entries.extend(files(directory))
     entries.append(("widget.zip", widget))
     server = bundle(entries)

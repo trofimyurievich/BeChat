@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { randomBytes, randomUUID, createHash, createHmac } from "node:crypto";
 import net from "node:net";
+import { DatabaseSync } from "node:sqlite";
 import { authConfig } from "../server/auth.mjs";
 
 const crm = "https://lcns.amocrm.ru",
@@ -186,6 +187,53 @@ test("real HTTP server authenticates CRM employees in widget, web and iOS and is
     ).status,
     200,
   );
+  const seed = new DatabaseSync(join(dir, "test.db"));
+  const privateChat = randomUUID();
+  const privateFile = randomUUID();
+  seed
+    .prepare("INSERT INTO chats VALUES(?,?,?,?,?)")
+    .run(
+      privateChat,
+      "Telegram",
+      "test-peer",
+      "amo:501:33",
+      JSON.stringify({
+        name: "Personal chat",
+        accountId: randomUUID(),
+        remotePeer: "123",
+      }),
+    );
+  seed
+    .prepare("INSERT INTO files VALUES(?,?,?,?,?,?,?,?)")
+    .run(
+      privateFile,
+      "amo:501:33",
+      privateChat,
+      "note.txt",
+      "text/plain",
+      2,
+      null,
+      Buffer.from("ok"),
+    );
+  seed.close();
+  for (const uid of [31, 32, 33, 34]) {
+    const view = await ok("/api/state", "GET", undefined, auth(accounts[uid]));
+    assert.equal(
+      view.chats.some((c) => c.id === privateChat),
+      uid === 33,
+    );
+    assert.equal(
+      (
+        await req(
+          "/api/files/" + privateFile,
+          "GET",
+          undefined,
+          auth(accounts[uid]),
+        )
+      ).status,
+      uid === 33 ? 200 : 404,
+    );
+  }
   for (const lane of ["web", "ios"]) {
     const verifier = rand(),
       nonce = rand(),

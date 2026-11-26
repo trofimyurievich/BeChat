@@ -18,3 +18,5 @@ release/
 dist/assets/orbit.*
 dist/assets/portrait-*
 server/user.mjs
+__pycache__/
+*.py[cod]
