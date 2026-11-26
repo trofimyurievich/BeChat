@@ -30,8 +30,8 @@ define(["jquery"], function ($) {
       const message = event.data;
       if (
         message?.type !== "bechat:sso:ready" ||
-        !/^[-\\w]{43}$/.test(message.challenge || "") ||
-        !/^[-\\w]{43}$/.test(message.nonce || "")
+        !/^[A-Za-z0-9_-]{43}$/.test(message.challenge || "") ||
+        !/^[A-Za-z0-9_-]{43}$/.test(message.nonce || "")
       )
         return;
       let match;

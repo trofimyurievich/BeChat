@@ -2,9 +2,9 @@
 
 **BeChat 1.1.0** объединяет переписку сотрудников в карточках amoCRM, браузере и приложении для iPhone. В рабочей сборке база изначально пуста. Каждый сотрудник входит через свою учётную запись **lcns.amocrm.ru**. Для развёртывания выделен адрес **bechat.onbequick.ru**.
 
-[Скачать релиз BeChat 1.1.0](https://github.com/trofimyurievich/BeChat/releases/tag/v1.1.0)
+[Сервер и iPhone 1.1.0](https://github.com/trofimyurievich/BeChat/releases/tag/v1.1.0) · [Виджет amoCRM 1.1.1](https://github.com/trofimyurievich/BeChat/releases/tag/widget-v1.1.1)
 
-На момент выпуска контейнер BeChat запущен на сервере Mysterious Macaw в Timeweb Cloud. Откройте [рабочий адрес BeChat](https://bechat.onbequick.ru). Пока администратор amoCRM оформляет приватную интеграцию, здесь отображается страница подключения. [Состояние процесса](https://bechat.onbequick.ru/livez) · [Готовность входа](https://bechat.onbequick.ru/healthz)
+BeChat подключён к **lcns.amocrm.ru** и работает на сервере Mysterious Macaw в Timeweb Cloud. Чтобы открыть переписку, зайдите в сделку и нажмите **Виджеты → BeChat → Открыть переписку**. [Веб-приложение](https://bechat.onbequick.ru) · [Состояние сервера](https://bechat.onbequick.ru/healthz)
 
 | Файл в релизе | Кому передать | Для чего он нужен |
 | --- | --- | --- |
