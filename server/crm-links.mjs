@@ -11,7 +11,7 @@ export function telegramName(value) {
 function phone(value){try{return smsCore.normalize(value);}catch{return "";}}
 function chatKeys(row) {
   const m=JSON.parse(row.meta),p=phone(m.phone||m.smsNumber) ||
-    (row.channel==="WhatsApp" && /^\d+(?::\d+)?@s\.whatsapp\.net$/.test(m.remotePeer||row.peer)?phone((m.remotePeer||row.peer).split(/[:@]/)[0]):"");
+    (row.channel==="WhatsApp" && /^\d+(?:(?::\d+)?@s\.whatsapp\.net)?$/.test(m.remotePeer||row.peer)?phone((m.remotePeer||row.peer).split(/[:@]/)[0]):"");
   const tg=row.channel==="Telegram"?telegramName(m.username):"";
   return [p,tg&&"tg:"+tg].filter(Boolean);
 }
@@ -72,5 +72,31 @@ export function crmLinks(db,signal) {
     for(const r of all)if(chatKeys(r).includes(key))reconcile(r);
     return true;
   }
-  return {card,search,due,reconcile};
+  function dealsFor(owner) {
+    const byChat=new Map();
+    for(const {chat,lead} of sql("SELECT DISTINCT chat,lead FROM crm_chat_links WHERE owner=? ORDER BY chat,length(lead) DESC,lead DESC").all(owner)){
+      if(!crmId(lead))continue;
+      if(!byChat.has(chat))byChat.set(chat,[]);
+      byChat.get(chat).push(lead);
+    }
+    return byChat;
+  }
+  function unresolvedMaxNumbers(owner,lead,account) {
+    const chats=sql("SELECT json_extract(meta,'$.phone') AS number FROM chats WHERE owner=? AND channel='MAX' AND json_extract(meta,'$.accountId')=?").all(owner,account);
+    const known=new Set(chats.map(chat=>phone(chat.number)));
+    if(!known.has(""))return [];
+    return sql("SELECT DISTINCT phone FROM crm_contact_numbers WHERE owner=? AND lead=? AND phone LIKE '+%'").all(owner,lead).map(row=>row.phone).filter(number=>!known.has(number));
+  }
+  function verifiedMaxPeer(owner,account,number,peer) {
+    if(!phone(number) || !peer)return;
+    const row=sql("SELECT * FROM chats WHERE owner=? AND channel='MAX' AND json_extract(meta,'$.accountId')=? AND json_extract(meta,'$.remotePeer')=?").get(owner,account,String(peer));
+    if(!row)return;
+    const meta=JSON.parse(row.meta);
+    if(meta.phone && phone(meta.phone)!==number)return;
+    meta.phone=number;
+    const data=JSON.stringify(meta);
+    sql("UPDATE chats SET meta=? WHERE id=?").run(data,row.id);
+    reconcile({...row,meta:data});
+  }
+  return {card,search,due,reconcile,dealsFor,unresolvedMaxNumbers,verifiedMaxPeer};
 }

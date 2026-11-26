@@ -27,5 +27,18 @@ test("link CRM cards by the exact messenger identity and release stale or ambigu
   links.search("employee","tg:some_client",[{id:"12",leads:["4"]},{id:"13",leads:["5"]}]);
   assert.deepEqual(list("4"),[]);assert.deepEqual(list("1"),["max","wa"]);
   assert.equal(telegramName("https://t.me/+invite"),"");assert.equal(telegramName("12345"),"");
+  assert.deepEqual(links.dealsFor("employee").get("max"),["1"]);
+  assert.equal(links.dealsFor("another").get("max"),undefined);
+  add("wa-digits","WhatsApp",{remotePeer:"79990000001"});
+  add("unknown","MAX",{remotePeer:"64328"});
+  add("private","MAX",{remotePeer:"64328"},"another");
+  links.card("employee","6",[{id:"12",phones:["+79990000001","+79990000009"]}]);
+  assert.deepEqual(links.dealsFor("employee").get("wa-digits"),["6","1"]);
+  assert.deepEqual(links.unresolvedMaxNumbers("employee","6","account"),["+79990000009"]);
+  links.verifiedMaxPeer("employee","account","+79990000009","64328");
+  assert.deepEqual(links.dealsFor("employee").get("unknown"),["6"]);
+  assert.equal(links.dealsFor("another").get("private"),undefined);
+  links.card("employee","6",[]);
+  assert.equal(links.dealsFor("employee").get("unknown"),undefined);
   db.close();
 });

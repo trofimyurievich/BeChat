@@ -344,6 +344,16 @@ function renderCompose() {
   BeChatMedia.mount();
   updateSmsMeter();
 }
+function dealCards(chat) {
+  const current=ctx.get("entity")==="leads"?ctx.get("entityId"):null;
+  const ids=[...new Set([...(chat.linkedLeads||[]),chat.leadId].filter(id=>/^[1-9]\d{0,15}$/.test(String(id))).map(String))];
+  if(!ids.length) return '<small class="deal-empty">По данным контакта пока нет совпадения в amoCRM.</small>';
+  ids.sort((a,b)=>Number(b===current)-Number(a===current));
+  return ids.map(id=>{
+    const title=String(chat.leadId)===id && chat.deal ? chat.deal : "Сделка №"+id;
+    return crmOrigin ? '<a class="dealbox" href="'+esc(crmOrigin)+'/leads/detail/'+id+'" target="_blank" rel="noopener"><strong>'+esc(title)+'</strong><span class="dealfoot">Открыть в amoCRM '+icon("external")+'</span></a>' : '<div class="dealbox"><strong>'+esc(title)+'</strong></div>';
+  }).join("");
+}
 function renderDetails() {
   const d = $("#details"),
     x = c();
@@ -354,7 +364,7 @@ function renderDetails() {
     d.innerHTML = "";
     return;
   }
-  d.innerHTML = `<div class="detailshead"><b>Карточка контакта</b>${btn("detailsclose", "close", "Закрыть карточку")}</div><div class="problock">${avatar(x)}<h2>${esc(x.name)}</h2><small>${esc(x.company || x.channel)}</small></div><section class="detailsection"><div class="sectioncap">${icon("brief")}Сделка</div><button class="dealbox" data-act="deal"><strong>${esc(x.deal || "Связать сделку")}</strong><small>${x.amount ? Number(x.amount).toLocaleString("ru-RU") + " ₽" : ""}</small><span class="stages">${stages.map((_, i) => `<i class="${i <= x.stage ? "on" : ""}"></i>`).join("")}</span><span class="dealfoot">${esc(stages[x.stage] || "Открыть сделку")}${icon("right")}</span></button></section><section class="detailsection"><div class="sectioncap">${icon("user")}Контакт</div>${[
+  d.innerHTML = `<div class="detailshead"><b>Карточка контакта</b>${btn("detailsclose", "close", "Закрыть карточку")}</div><div class="problock">${avatar(x)}<h2>${esc(x.name)}</h2><small>${esc(x.company || x.channel)}</small></div><section class="detailsection"><div class="sectioncap">${icon("brief")}Сделка</div>${dealCards(x)}</section><section class="detailsection"><div class="sectioncap">${icon("user")}Контакт</div>${[
     ["Канал", x.channel],
     ["Аккаунт", x.username ? "@" + x.username : x.peer || "—"],
     ["Ответственный", x.owner || "—"],
@@ -858,32 +868,6 @@ async function handle(act) {
     );
     return;
   }
-  if (act === "deal") {
-    const link =
-      crmOrigin && x.leadId
-        ? `<p class="mspace"><a class="actionlink" href="${esc(crmOrigin)}/leads/detail/${Number(x.leadId)}" target="_blank" rel="noopener">Открыть в amoCRM ${icon("external")}</a></p>`
-        : "";
-    modal(
-      "Сделка",
-      editable()
-        ? form(
-            "deal",
-            field("Название", "deal", x.deal) +
-              field("Бюджет, ₽", "amount", x.amount, "number") +
-              select("Этап в BeChat", "stage", stages, x.stage) +
-              field("Компания", "company", x.company) +
-              (field("ID сделки amoCRM", "leadId", x.leadId, "number") +
-                field(
-                  "ID контакта amoCRM",
-                  "contactId",
-                  x.contactId,
-                  "number",
-                )),
-          ) + link
-        : `<p>${esc(x.deal)}</p>${link}`,
-    );
-    return;
-  }
   if (act === "tags") {
     modal(
       "Теги контакта",
@@ -978,15 +962,6 @@ async function submit(action, fd) {
     return;
   }
   if (!x) return;
-  if (action === "deal") {
-    await patch({
-      deal: get("deal"),
-      amount: Math.max(0, Number(get("amount"))),
-      stage: Number(get("stage")),
-      company: get("company"),
-      ...{ leadId: get("leadId"), contactId: get("contactId") },
-    });
-  }
   if (action === "tags")
     await patch({
       tags: [

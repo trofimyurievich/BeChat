@@ -259,6 +259,25 @@ function setStatus(m, status) {
     );
 }
 const automaticLinks=crmLinks(db,signal);
+// Resolve an existing MAX dialog only when an employee opens a CRM card with a phone.
+const maxChecks=new Map();
+let maxLookup=Promise.resolve();
+function matchMaxCard(owner,lead) {
+  const account=accounts.pick(owner,"MAX");
+  if(!account)return;
+  const now=Date.now();
+  for(const [key,until] of maxChecks)if(until<=now)maxChecks.delete(key);
+  for(const number of automaticLinks.unresolvedMaxNumbers(owner,lead,account)){
+    const key=account+"/"+number;
+    if(maxChecks.has(key) || maxChecks.size>=1500)continue;
+    maxChecks.set(key,now+3600000);
+    maxLookup=maxLookup.then(async()=>{
+      if(accounts.pick(owner,"MAX")!==account)return;
+      const peer=await accounts.identifyMax(account,number);
+      if(peer)transaction(()=>automaticLinks.verifiedMaxPeer(owner,account,number,peer));
+    }).catch(()=>{maxChecks.set(key,Date.now()+300000);});
+  }
+}
 function ingest(v) {
   if (v.receipt && v.accountId) return readReceipts.receive(v);
   if (v.profile) {
@@ -816,8 +835,10 @@ async function route(req, res) {
     if (path === "/api/contact-photos" && method === "POST") {
       const {contacts,lead,leadFields} = parse(await readBody(req,65536));
       if (!Array.isArray(contacts) || contacts.length>100) bad(400,"Проверьте контакты сделки");
-      if (/^[1-9]\d{0,15}$/.test(String(lead)) && u.role!=="observer")
+      if (/^[1-9]\d{0,15}$/.test(String(lead)) && u.role!=="observer") {
         transaction(()=>automaticLinks.card(u.login,String(lead),contacts,leadFields));
+        matchMaxCard(u.login,String(lead));
+      }
       return json(res,contacts.filter(c=>c?.id).map(c=>({id:String(c.id),photos:
         many("SELECT DISTINCT c.channel,a.jpeg FROM crm_chat_links l JOIN chats c ON c.id=l.chat JOIN avatars a ON a.chat=c.id WHERE l.owner=? AND l.lead=? AND l.contact=? AND c.owner=?",u.login,String(lead),String(c.id),u.login)
         .map(r=>({channel:r.channel,src:"data:image/jpeg;base64,"+r.jpeg}))})));
@@ -894,6 +915,7 @@ async function route(req, res) {
       const entity = url.searchParams.get("entity"),
         eid = url.searchParams.get("entityId");
       const related = new Set(many("SELECT chat FROM crm_chat_links WHERE owner=? AND lead=?",u.login,String(eid||url.searchParams.get("lead")||"")).map(r=>r.chat));
+      const dealsByChat=automaticLinks.dealsFor(u.login);
       const rows = many("SELECT * FROM chats ORDER BY rowid DESC")
         .filter((r) => canSee(u, r))
         .map((r) => ({ r, m: metadata(r) }))
@@ -915,6 +937,7 @@ async function route(req, res) {
         if (hasEarlier) data.pop();
         return {
         ...m,
+        linkedLeads:dealsByChat.get(m.id)||[],
         hasEarlier,
         searchMatch: url.searchParams.get("q") ? !!one("SELECT 1 FROM messages m LEFT JOIN message_views v ON v.message=m.id AND v.login=? WHERE m.chat=? AND COALESCE(v.hidden,0)=0 AND instr(lower(COALESCE(v.edited_text,json_extract(m.body,'$.text'))),lower(?))>0 LIMIT 1",u.login,m.id,trim(url.searchParams.get("q"),200)) : false,
         messages: data.reverse().map(r => {

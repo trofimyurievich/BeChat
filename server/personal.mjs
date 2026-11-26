@@ -476,6 +476,7 @@ export function createPersonal(db, onMessage, options = {}) {
     remove,
     pick,
     resolvePeer,
+    identifyMax(id,phone) {return request(running.get(id),"identify_max",{peer:phone},6000);},
     async media(chat, ref) {
       const meta=JSON.parse(chat.meta), a=row(meta.accountId);
       if(!a || a.owner!==chat.owner || a.channel!=="MAX" || !running.get(a.id)?.online)

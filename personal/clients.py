@@ -479,6 +479,13 @@ class Max(Runtime):
                             await self.contact(user)
         await c.start()
 
+    async def identify_max(self, phone):
+        if not re.fullmatch(r"\+[1-9]\d{6,14}", phone):
+            return None
+        user = await self.client.search_by_phone(phone)
+        me = self.client.me.contact.id
+        return str(self.client.get_chat_id(user.id, me)) if user and user.id != me else None
+
     async def resolve(self, peer):
         if str(peer).startswith("+"):
             user = await self.client.search_by_phone(str(peer))

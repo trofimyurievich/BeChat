@@ -115,6 +115,8 @@ async def run():
                     result = True
                 elif op == "resolve" and worker.active:
                     result = await worker.resolve(data["peer"])
+                elif op == "identify_max" and worker.active:
+                    result = await worker.identify_max(data["peer"])
                 elif op == "media" and worker.active:
                     result = await worker.media_url(data["peer"],data["messageId"],data["slot"])
                 elif op == "send" and worker.active:
