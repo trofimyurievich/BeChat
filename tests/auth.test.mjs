@@ -117,7 +117,7 @@ test("real HTTP server authenticates CRM employees in widget, web and iOS and is
     );
   const exchange = (ticket, verifier, client) =>
     req("/auth/exchange", "POST", { ticket, verifier, client });
-  assert.equal((await ok("/healthz")).version, "1.1.7");
+  assert.equal((await ok("/healthz")).version, "1.1.8");
   assert.equal((await req("/api/state")).status, 401);
   assert.equal((await req("/api/deal-timeline?lead=1")).status,401);
   assert.equal((await req("/api/voice-text/file","POST",{})).status,401);
@@ -254,6 +254,14 @@ test("real HTTP server authenticates CRM employees in widget, web and iOS and is
   assert.equal(new Set([...first.items,...second.items].map(m=>m.id)).size,254);
   assert.deepEqual(first.items.slice(0,2).map(m=>m.at),days);
   assert.equal((await ok("/api/deal-timeline?lead=999","GET",undefined,auth(accounts[31]))).items.length,0);
+  const identifiers={contacts:[],lead:"987",leadFields:{usernames:["https://t.me/Example_TEST"]}};
+  const change=new DatabaseSync(join(dir,"test.db"));
+  change.prepare("UPDATE chats SET meta=json_set(meta,'$.username','example_test') WHERE id=?").run(privateChat);
+  change.close();
+  await ok("/api/contact-photos","POST",identifiers,auth(accounts[33]));
+  assert.equal((await ok("/api/deal-timeline?lead=987","GET",undefined,auth(accounts[33]))).items.length,250);
+  await ok("/api/contact-photos","POST",{...identifiers,leadFields:{usernames:[]}},auth(accounts[33]));
+  assert.equal((await ok("/api/deal-timeline?lead=987","GET",undefined,auth(accounts[33]))).items.length,0);
   const linkChat = uid => req("/api/deal-dialogs", "POST", {chat:privateChat,lead:"456"}, auth(accounts[uid]));
   assert.equal((await linkChat(31)).status, 404);
   assert.equal((await ok("/api/deal-dialogs","GET",undefined,auth(accounts[33])))[0].id, privateChat);

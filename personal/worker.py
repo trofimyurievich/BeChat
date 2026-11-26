@@ -66,7 +66,7 @@ class Runtime:
                 emit("history_error", reason=type(exc).__name__)
                 await asyncio.sleep(35)
 
-    def profile(self, peer, name=None, phone=None, picture=None):
+    def profile(self, peer, name=None, phone=None, picture=None, username=None):
         from PIL import Image, ImageOps
         photo = None
         if picture:
@@ -79,7 +79,7 @@ class Runtime:
                         photo = base64.b64encode(data.getvalue()).decode()
             except (ValueError, OSError, Image.DecompressionBombError):
                 pass
-        emit("profile", peer=str(peer), name=name, phone=str(phone or ""), photo=photo)
+        emit("profile", peer=str(peer), name=name, phone=str(phone or ""), photo=photo, **({"username": username} if username is not None else {}))
 
 
     def ready(self, identity, label):

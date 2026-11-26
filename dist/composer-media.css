@@ -60,3 +60,6 @@ a.filecard,a.file-download,#viewer-download {color:inherit;text-decoration:none;
 .voice-player:not([data-shape=ready]) .voice-wave:before {content:"";display:block;position:absolute;top:50%;width:100%;border-top:2px dotted var(--muted)}
 .voice-caption {grid-column:1/-1;padding:7px 0 2px;border-top:1px solid var(--line);font:inherit;white-space:pre-wrap;overflow-wrap:anywhere}
 @media(max-width:440px){.voice-player{grid-template-columns:36px minmax(30px,1fr) 27px;gap:5px}.voice-play{width:36px;height:36px}}
+
+.voice-player .voice-play,.voice-player .voice-play:hover {color:var(--base)}
+.voice-player .voice-play svg {fill:currentColor;stroke:none}

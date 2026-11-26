@@ -1,14 +1,14 @@
 # BeChat от BeQuick
 
-**BeChat 1.1.7** объединяет переписку сотрудников в карточках amoCRM, браузере и приложении для iPhone. В рабочей сборке база изначально пуста. Каждый сотрудник входит через свою учётную запись **lcns.amocrm.ru**. Для развёртывания выделен адрес **bechat.onbequick.ru**.
+**BeChat 1.1.8** объединяет переписку сотрудников в карточках amoCRM, браузере и приложении для iPhone. В рабочей сборке база изначально пуста. Каждый сотрудник входит через свою учётную запись **lcns.amocrm.ru**. Для развёртывания выделен адрес **bechat.onbequick.ru**.
 
-[iPhone 1.1.7](https://github.com/trofimyurievich/BeChat/releases/tag/v1.1.7) · [Сервер и виджет amoCRM 1.1.7](https://github.com/trofimyurievich/BeChat/releases/tag/v1.1.7)
+[iPhone 1.1.8](https://github.com/trofimyurievich/BeChat/releases/tag/v1.1.8) · [Сервер и виджет amoCRM 1.1.8](https://github.com/trofimyurievich/BeChat/releases/tag/v1.1.8)
 
 BeChat подключён к **lcns.amocrm.ru** и работает на сервере Mysterious Macaw в Timeweb Cloud. Чтобы открыть переписку, зайдите в сделку и нажмите **Виджеты → BeChat → Написать сообщение**. [Веб-приложение](https://bechat.onbequick.ru) · [Состояние сервера](https://bechat.onbequick.ru/healthz)
 
 | Файл в релизе | Кому передать | Для чего он нужен |
 | --- | --- | --- |
-| **BeChat-Server-1.1.7.zip** | Администратору Timeweb | Сервер, веб-клиент, база SQLite при запуске, настройки Docker и инструкции |
+| **BeChat-Server-1.1.8.zip** | Администратору Timeweb | Сервер, веб-клиент, база SQLite при запуске, настройки Docker и инструкции |
 | **widget.zip** | Администратору amoCRM | Добавляет BeChat в карточки контактов и сделок |
 | **BeChat.ipa** | Ответственному за iPhone | Приложение для iOS 17+, которое нужно подписать в 3uTools для своего устройства |
 | **SHA256SUMS.txt** | Администратору | Контрольные суммы скачанных файлов |

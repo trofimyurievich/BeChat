@@ -237,7 +237,8 @@ export function createPersonal(db, onMessage, options = {}) {
         if (!peer || peer.length > 150) return;
         const photo = typeof event.photo === "string" && event.photo.length < 36000 && event.photo.startsWith("/9j/") ? event.photo : null;
         onMessage({profile:true, channel:a.channel, accountId:a.id, owner:a.owner, remotePeer:peer, peer:a.id+":"+peer,
-          name: String(event.name || "").slice(0,200), phone:String(event.phone || "").slice(0,32), photo});
+          name: String(event.name || "").slice(0,200), phone:String(event.phone || "").slice(0,32),
+          ...(a.channel==="Telegram" && typeof event.username==="string"?{username:event.username.slice(0,40)}:{}), photo});
       } else if (event.type === "message" && live.online) {
         const peer = String(event.peer || ""),
           remote = String(event.remote || "");

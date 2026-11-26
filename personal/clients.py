@@ -39,7 +39,10 @@ async def image_bytes(url, domains):
 
 class Telegram(Runtime):
     async def contact(self, peer):
-        if peer.id in self.profiles:
+        identity=(peer.username or "",peer.phone or "")
+        if not hasattr(self,"telegram_identities"):
+            self.telegram_identities={}
+        if self.telegram_identities.get(peer.id)==identity:
             return
         picture = None
         if peer.photo:
@@ -47,7 +50,8 @@ class Telegram(Runtime):
                 picture = await self.client.download_profile_photo(peer, file=bytes, download_big=False)
             except Exception:
                 pass
-        self.profile(peer.id, " ".join(v for v in (peer.first_name,peer.last_name) if v), peer.phone, picture)
+        self.profile(peer.id, " ".join(v for v in (peer.first_name,peer.last_name) if v), peer.phone, picture, username=peer.username or "")
+        self.telegram_identities[peer.id]=identity
         self.profiles.add(peer.id)
 
     async def start(self):
@@ -92,7 +96,10 @@ class Telegram(Runtime):
         @c.on(events.NewMessage)
         async def receive(event):
             if event.is_private:
-                await process(event.message, await event.get_chat(), False)
+                peer=await event.get_chat()
+                if isinstance(peer,User) and not peer.bot and not peer.is_self:
+                    await self.contact(peer)
+                await process(event.message,peer,False)
         async def collect():
             async for dialog in c.iter_dialogs(limit=None):
                 peer = dialog.entity

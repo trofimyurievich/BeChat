@@ -1,0 +1,31 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import {DatabaseSync} from "node:sqlite";
+import {crmLinks, telegramName} from "../server/crm-links.mjs";
+
+test("link CRM cards by the exact messenger identity and release stale or ambiguous matches",()=>{
+  const db=new DatabaseSync(":memory:");
+  db.exec("CREATE TABLE chats(id,channel,owner,peer,meta);CREATE TABLE crm_chat_links(owner,chat,lead,contact,PRIMARY KEY(owner,chat,lead,contact));CREATE TABLE crm_contact_numbers(owner,lead,contact,phone,PRIMARY KEY(owner,lead,contact,phone));CREATE TABLE crm_phone_checks(owner,phone,checked,PRIMARY KEY(owner,phone))");
+  const add=(id,channel,meta,owner="employee")=>db.prepare("INSERT INTO chats VALUES(?,?,?,?,?)").run(id,channel,owner,id,JSON.stringify({accountId:"account",...meta}));
+  add("tg","Telegram",{username:"Some_Client"});
+  add("max","MAX",{phone:"89990000001"});
+  add("wa","WhatsApp",{remotePeer:"79990000001@s.whatsapp.net"});
+  add("lid","WhatsApp",{remotePeer:"79990000001@lid"});
+  add("id","MAX",{remotePeer:"79990000001"});
+  add("other","Telegram",{username:"Some_Client"},"another");
+  const links=crmLinks(db,()=>{}), list=lead=>db.prepare("SELECT chat FROM crm_chat_links WHERE lead=? ORDER BY chat").all(lead).map(v=>v.chat);
+  const client={id:"12",phones:["+7 (999) 000-00-01"],usernames:["@some_CLIENT"]};
+  links.card("employee","1",[client]);
+  assert.deepEqual(list("1"),["max","tg","wa"]);
+  links.card("employee","2",[{...client,id:"13",usernames:[]}]);
+  assert.deepEqual(list("1"),["tg"]);assert.deepEqual(list("2"),[]);
+  links.card("employee","2",[]);assert.deepEqual(list("1"),["max","tg","wa"]);
+  links.card("employee","3",[{...client,phones:[],usernames:[]}],{usernames:["https://t.me/Some_Client"]});
+  assert.deepEqual(list("3"),["tg"]);
+  links.card("employee","3",[],{});assert.deepEqual(list("3"),[]);
+  links.search("employee","tg:some_client",[{id:"12",leads:["4"]}]);assert.deepEqual(list("4"),["tg"]);
+  links.search("employee","tg:some_client",[{id:"12",leads:["4"]},{id:"13",leads:["5"]}]);
+  assert.deepEqual(list("4"),[]);assert.deepEqual(list("1"),["max","wa"]);
+  assert.equal(telegramName("https://t.me/+invite"),"");assert.equal(telegramName("12345"),"");
+  db.close();
+});

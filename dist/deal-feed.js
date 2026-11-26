@@ -2,19 +2,20 @@
 const feedParams = new URLSearchParams(location.search);
 const dealFeedMode = window.parent !== window && feedParams.get("feed") === "1" &&
   feedParams.get("entity") === "leads" && /^[1-9]\d*$/.test(feedParams.get("entityId"));
-let feedChoices = null, contactList = [], contactGeneration=0, contactRevision="";
+let contactList = [], leadIdentities={}, receivedContacts=false, contactGeneration=0, contactRevision="";
 async function publishContactPhotos() {
-  if (!dealFeedMode || !token || !contactList.length) return;
+  if (!dealFeedMode || !token || !receivedContacts) return;
   const generation=++contactGeneration;
   try {
-    const items=await api("contact-photos","POST",{contacts:contactList,lead:feedParams.get("entityId")});
+    const items=await api("contact-photos","POST",{contacts:contactList,leadFields:leadIdentities,lead:feedParams.get("entityId")});
     if (generation===contactGeneration) feedParent("photos",{items});
   } catch {}
 }
 window.addEventListener("message",event=>{
   if (!dealFeedMode || event.source!==parent || event.origin!==window.BECHAT_CONFIG?.crmOrigin ||
       event.data?.type!=="bechat:contacts" || !Array.isArray(event.data.contacts)) return;
-  contactList=event.data.contacts.slice(0,50);
+  receivedContacts=true;leadIdentities=event.data.leadFields||{};
+  contactList=event.data.contacts.slice(0,100);
   publishContactPhotos();
 });
 document.addEventListener("keydown",event=>{
@@ -26,21 +27,21 @@ document.addEventListener("keydown",event=>{
 if (dealFeedMode) {
   let looking=null, wake=null;
   window.addEventListener("message",e=>{
-    if (e.origin===window.BECHAT_CONFIG?.crmOrigin && e.source===parent && e.data?.type==="bechat:crm:matches" && looking && e.data.phone===looking) wake?.(e.data.matches);
+    if (e.origin===window.BECHAT_CONFIG?.crmOrigin && e.source===parent && e.data?.type==="bechat:crm:matches" && looking && (e.data.key||e.data.phone)===looking) wake?.(e.data.matches);
   });
   window.addEventListener("DOMContentLoaded",async()=>{
     const pause=ms=>new Promise(done=>setTimeout(done,ms));
     while(true) {
       if (!token || !editable() || document.hidden) {await pause(2500);continue;}
       try {
-        looking=(await api("contact-match")).phone;
+        const match=await api("contact-match");looking=match.key||match.phone;
         if (!looking) {await pause(15000);continue;}
         const matches=await new Promise(done=>{
           const timer=setTimeout(()=>done(null),15000);
           wake=value=>{clearTimeout(timer);done(value);};
-          parent.postMessage({type:"bechat:crm:find",phone:looking},window.BECHAT_CONFIG.crmOrigin);
+          parent.postMessage({type:"bechat:crm:find",key:looking,phone:looking.startsWith("+")?looking:null},window.BECHAT_CONFIG.crmOrigin);
         });
-        if(Array.isArray(matches)) await api("contact-match","POST",{phone:looking,matches});
+        if(Array.isArray(matches)) await api("contact-match","POST",{key:looking,matches});
         else await pause(15000);
       } catch {await pause(15000);}
       finally {looking=null;wake=null;}
@@ -56,15 +57,6 @@ if (dealFeedMode) {
     const button = e.target.closest("button");
     if (!button) return;
     if (button.dataset.feed === "open") return feedParent("open");
-    if (!token) return;
-    if (button.dataset.feed === "choose") {
-      feedChoices = feedChoices ? null : await api("deal-dialogs");
-    } else if (button.dataset.link) {
-      await api("deal-dialogs", "POST", { chat: button.dataset.link, lead: feedParams.get("entityId") });
-      feedChoices = null;
-      await refresh();
-    }
-    renderDealFeed();
   }));
 }
 function feedParent(action, values = {}) {
@@ -109,7 +101,5 @@ function renderDealFeed() {
       (messages.length ? '' : '<p>Сообщений пока нет</p>') + '</article>';
   });
   panel.innerHTML = (groups.join("") || (chronological && state.chats.length ? "" : '<p>К этой сделке пока не привязана переписка BeChat.</p>')) +
-    '<footer><button data-feed="open">Открыть BeChat</button>' +
-    (editable() ? '<button data-feed="choose">' + (feedChoices ? "Закрыть список" : "Привязать диалог") + '</button>' : '') + '</footer>' +
-    (feedChoices ? '<section class="feed-choices">' + (feedChoices.map(c => '<button data-link="' + esc(c.id) + '">' + esc(c.channel + ' · ' + c.name) + '</button>').join("") || '<p>Свободных диалогов пока нет. Новый диалог можно начать через «Открыть BeChat».</p>') + '</section>' : '');
+    '<footer><button data-feed="open">Открыть BeChat</button></footer>';
 }

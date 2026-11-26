@@ -1,3 +1,4 @@
+import { crmLinks, telegramName } from "./crm-links.mjs";
 import { makeCard, cardPages } from "./cards.mjs";
 import { searchGifs, getAnimation, normalizeVoice, voiceText } from "./media.mjs";
 import { createReadReceipts } from "./receipts.mjs";
@@ -257,11 +258,7 @@ function setStatus(m, status) {
       },
     );
 }
-function linkByPhone(row, phone) {
-  if (!phone) return;
-  const inserted=run("INSERT OR IGNORE INTO crm_chat_links SELECT owner,?,lead,contact FROM crm_contact_numbers WHERE owner=? AND phone=?",row.id,row.owner,phone);
-  if (inserted.changes) signal(row.id);
-}
+const automaticLinks=crmLinks(db,signal);
 function ingest(v) {
   if (v.receipt && v.accountId) return readReceipts.receive(v);
   if (v.profile) {
@@ -274,8 +271,10 @@ function ingest(v) {
       run("INSERT OR REPLACE INTO avatars VALUES(?,?,?)",row.id,digest,v.photo);
       meta.avatarVersion = digest;
     }
-    linkByPhone(row, meta.phone);
-    if (JSON.stringify(meta)!==row.meta) { saveMeta(row.id,meta); signal(row.id); }
+    if(row.channel==="Telegram" && v.username!==undefined)meta.username=telegramName(v.username);
+    if (JSON.stringify(meta)!==row.meta) {
+      saveMeta(row.id,meta);automaticLinks.reconcile({...row,meta:JSON.stringify(meta)});signal(row.id);
+    }
     return;
   }
   if (v.status) {
@@ -332,8 +331,10 @@ function ingest(v) {
   }
   if (!v.outgoing && !v.history) meta.unanswered = (meta.unanswered || 0) + 1;
   meta.archived = false;
+  const oldName=meta.username;
   if (v.username) meta.username = v.username;
   saveMeta(row.id, meta);
+  if(oldName!==meta.username || row.channel==="WhatsApp" && !meta.phone)automaticLinks.reconcile({...row,meta:JSON.stringify(meta)});
   const m = {
     id: mid,
     side: v.outgoing ? "out" : "in",
@@ -777,7 +778,7 @@ async function route(req, res) {
     return json(res, { service: "BeChat", status: "live" });
   if (path === "/healthz" && method === "GET") {
     if (!one("SELECT 1 AS healthy")?.healthy) bad(503, "База недоступна");
-    return json(res, { service: "BeChat", version: "1.1.7", status: "ok" });
+    return json(res, { service: "BeChat", version: "1.1.8", status: "ok" });
   }
   if (path.startsWith("/api/")) {
     const u = method==="GET" && path.startsWith("/api/files/") && url.searchParams.has("download")
@@ -803,47 +804,22 @@ async function route(req, res) {
     if (path === "/api/contact-match") {
       requireWrite(u);
       if (method==="GET") {
-        const row=one("SELECT DISTINCT json_extract(c.meta,'$.phone') AS phone FROM chats c LEFT JOIN crm_phone_checks t ON t.phone=json_extract(c.meta,'$.phone') AND t.owner=c.owner WHERE c.owner=? AND json_extract(c.meta,'$.accountId') IS NOT NULL AND json_extract(c.meta,'$.phone') IS NOT NULL AND COALESCE(t.checked,0)<? ORDER BY COALESCE(t.checked,0),c.rowid DESC LIMIT 1",u.login,Date.now()-86400000);
-        return json(res,{phone:row?.phone||null});
+        const key=automaticLinks.due(u.login);
+        return json(res,{key,phone:key?.startsWith("+")?key:null});
       }
       if(method!=="POST") bad(405,"Требуется POST");
-      const v=parse(await readBody(req,8192)), phone=normalPhone(v.phone);
-      if (!phone || !Array.isArray(v.matches) || !one("SELECT 1 FROM chats WHERE owner=? AND json_extract(meta,'$.phone')=?",u.login,phone))
-        bad(400,"Контакт недоступен");
-      transaction(()=>{
-        run("INSERT OR REPLACE INTO crm_phone_checks VALUES(?,?,?)",u.login,phone,Date.now());
-        if(v.matches.length!==1) return;
-        const entry=v.matches[0];
-        if(!/^[1-9]\d{0,15}$/.test(String(entry.id)) || !Array.isArray(entry.leads)) return;
-        for(const lead of entry.leads.filter(x=>/^[1-9]\d{0,15}$/.test(String(x)))) {
-          run("INSERT OR IGNORE INTO crm_contact_numbers VALUES(?,?,?,?)",u.login,String(lead),String(entry.id),phone);
-        }
-        for(const row of many("SELECT * FROM chats WHERE owner=? AND json_extract(meta,'$.phone')=?",u.login,phone)) linkByPhone(row,phone);
-      });
+      const v=parse(await readBody(req,65536)),key=v.key||normalPhone(v.phone);
+      if(!transaction(()=>automaticLinks.search(u.login,key,v.matches)))bad(400,"Контакт недоступен");
       return json(res,{ok:true});
     }
     if (path === "/api/contact-photos" && method === "POST") {
-      const {contacts,lead} = parse(await readBody(req,16384));
-      if (!Array.isArray(contacts) || contacts.length>50) bad(400,"Проверьте контакты сделки");
-      if (/^[1-9]\d{0,15}$/.test(String(lead)) && u.role!=="observer") transaction(()=>{
-        run("DELETE FROM crm_contact_numbers WHERE owner=? AND lead=?",u.login,String(lead));
-        for (const c of contacts) {
-          if(!/^[1-9]\d{0,15}$/.test(String(c?.id))) continue;
-          for(const p of (Array.isArray(c.phones)?c.phones:[]).map(normalPhone).filter(Boolean))
-            run("INSERT OR IGNORE INTO crm_contact_numbers VALUES(?,?,?,?)",u.login,String(lead),String(c.id),p);
-        }
-        run("DELETE FROM crm_chat_links WHERE owner=? AND lead=? AND NOT EXISTS(SELECT 1 FROM crm_contact_numbers n JOIN chats c ON c.owner=n.owner AND json_extract(c.meta,'$.phone')=n.phone WHERE n.lead=crm_chat_links.lead AND n.contact=crm_chat_links.contact AND c.id=crm_chat_links.chat)",u.login,String(lead));
-        const inserted=run("INSERT OR IGNORE INTO crm_chat_links SELECT c.owner,c.id,n.lead,n.contact FROM crm_contact_numbers n JOIN chats c ON c.owner=n.owner AND json_extract(c.meta,'$.phone')=n.phone WHERE n.owner=? AND n.lead=?",u.login,String(lead));
-        if (inserted.changes) for(const r of many("SELECT chat FROM crm_chat_links WHERE owner=? AND lead=?",u.login,String(lead))) signal(r.chat);
-      });
-      const rows = many("SELECT c.*,a.jpeg FROM chats c JOIN avatars a ON a.chat=c.id WHERE c.owner=?",u.login);
-      return json(res,contacts.map(c => {
-        const phones = new Set((Array.isArray(c.phones)?c.phones:[]).map(normalPhone).filter(Boolean));
-        return {id:String(c.id),photos:rows.filter(r => {
-          const m = JSON.parse(r.meta);
-          return canSee(u,r) && ((m.contactId && String(m.contactId)===String(c.id)) || phones.has(normalPhone(m.phone)));
-        }).map(r=>({channel:r.channel,src:"data:image/jpeg;base64,"+r.jpeg}))};
-      }));
+      const {contacts,lead,leadFields} = parse(await readBody(req,65536));
+      if (!Array.isArray(contacts) || contacts.length>100) bad(400,"Проверьте контакты сделки");
+      if (/^[1-9]\d{0,15}$/.test(String(lead)) && u.role!=="observer")
+        transaction(()=>automaticLinks.card(u.login,String(lead),contacts,leadFields));
+      return json(res,contacts.filter(c=>c?.id).map(c=>({id:String(c.id),photos:
+        many("SELECT DISTINCT c.channel,a.jpeg FROM crm_chat_links l JOIN chats c ON c.id=l.chat JOIN avatars a ON a.chat=c.id WHERE l.owner=? AND l.lead=? AND l.contact=? AND c.owner=?",u.login,String(lead),String(c.id),u.login)
+        .map(r=>({channel:r.channel,src:"data:image/jpeg;base64,"+r.jpeg}))})));
     }
     if (path.startsWith("/api/avatar/") && method==="GET") {
       const chat=visibleChat(path.slice(12),u);
@@ -1073,9 +1049,10 @@ async function route(req, res) {
       const previous = JSON.parse(row.meta);
       if (extra.leadId && previous.leadId && String(previous.leadId)!==String(extra.leadId))
         bad(409,"Этот диалог уже связан с другой сделкой");
-      if (recipientPhone) linkByPhone(row,recipientPhone);
+
       if (Object.keys(extra).length)
         saveMeta(row.id, { ...JSON.parse(row.meta), ...extra });
+      automaticLinks.reconcile({...row,meta:JSON.stringify({...JSON.parse(row.meta),...extra})});
       return json(res, { id: row.id });
     }
     if (path === "/api/templates" && method === "POST") {
@@ -1224,7 +1201,7 @@ async function route(req, res) {
           crmOrigin: authSettings.crm,
           accountId:authSettings.tenant,
           serviceOrigin: authSettings.origin,
-          version: "1.1.7",
+          version: "1.1.8",
         }) +
         ";",
     );

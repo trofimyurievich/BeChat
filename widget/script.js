@@ -70,39 +70,80 @@ define(["jquery"], function ($) {
       if (/^8\d{10}$/.test(n)) n="7"+n.slice(1);
       return "+"+n;
     };
-    async function findCrmContact(phone) {
-      const exact=[];
+    function crmIdentifiers(entity) {
+      const phones=new Set(), usernames=new Set();
+      for(const f of entity?.custom_fields_values||[]){
+        for(const v of f.values||[]){
+          const label=[f.field_name,f.field_code,v.enum_code].filter(Boolean).join(" ").toLowerCase();
+          const raw=String(v.value||"").trim();
+          const tg=/telegram|телеграм|(?:^|[\s_])tg(?:[\s_]|$)/i.test(label);
+          const messaging=/whatsapp|ватсап|(?:^|[\s_])max(?:[\s_]|$)|макс/i.test(label);
+          if(f.field_code==="PHONE" || /телефон|phone/.test(label) || ((tg||messaging) && /^\+/.test(raw))){
+            if(!/id сообщения|message.?id|chat.?id|telegramid|whatsapplid/.test(label) && /^(?:\+|00)?[\d ()-]{7,24}$/.test(raw)){
+              let value=raw.replace(/[ ()-]/g,"").replace(/^00/,"+");
+              value=normalized(value);if(/^\+[1-9]\d{6,14}$/.test(value))phones.add(value);
+            }
+          }
+          if((tg && !/message|сообщени|chat.?id|telegramid|id.?telegram|id.?телеграм/.test(label)) || /^https?:\/\/(?:t\.me|telegram\.me)\//i.test(raw)){
+            const handle=raw.replace(/^(?:https?:\/\/)?(?:t\.me|telegram\.me)\//i,"").replace(/\/$/,"").replace(/^@/,"").toLowerCase();
+            if(/^[a-z][a-z0-9_]{2,31}$/.test(handle))usernames.add(handle);
+          }
+        }
+      }
+      return {phones:[...phones],usernames:[...usernames]};
+    }
+    async function crmGet(url) {
+      const r=await fetch(url,{credentials:"same-origin",headers:{Accept:"application/json"}});
+      if(!r.ok)throw Error("amoCRM temporarily unavailable");
+      return r.status===204?{}:r.json();
+    }
+    async function findCrmContact(key) {
+      const tg=key.startsWith("tg:"), exact=new Map(), value=tg?key.slice(3):key;
       let path=new URL("/api/v4/contacts",location.origin);
-      path.search=new URLSearchParams({query:phone.slice(1),with:"leads",limit:"100"});
-      while(path && exact.length<2) {
-        const r=await fetch(path,{credentials:"same-origin",headers:{Accept:"application/json"}});
-        if(r.status===204) break;
-        if(!r.ok) throw Error("CRM unavailable");
-        const data=await r.json();
+      path.search=new URLSearchParams({query:tg?value:value.slice(1),with:"leads",limit:"100"});
+      while(path && exact.size<2) {
+        const data=await crmGet(path);
         for(const c of data._embedded?.contacts||[]) {
-          if((c.custom_fields_values||[]).some(f=>f.field_code==="PHONE" && f.values?.some(v=>normalized(v.value)===phone)))
-            exact.push({id:String(c.id),leads:(c._embedded?.leads||[]).map(l=>String(l.id))});
+          const ids=crmIdentifiers(c);
+          if((tg?ids.usernames:ids.phones).includes(value))exact.set(c.id,{id:String(c.id),leads:(c._embedded?.leads||[]).map(l=>String(l.id))});
         }
         const next=data._links?.next?.href;
-        path=next ? new URL(next,location.origin) : null;
-        if(path && (path.origin!==location.origin || path.pathname!=="/api/v4/contacts")) break;
+        path=next?new URL(next,location.origin):null;
+        if(path && (path.origin!==location.origin || path.pathname!=="/api/v4/contacts"))break;
       }
-      return exact;
+      return [...exact.values()];
     }
-    function contactsOnCard() {
-      return [...document.querySelectorAll(".js-card-fields form.linked-form[action*='/contacts/']")].map(form=>({
-        id:form.querySelector("input[name='ID']")?.value || "",
-        phones:[...form.querySelectorAll(".control-phone__formatted")].map(input=>input.value).filter(Boolean)
-      })).filter(x=>/^[1-9]\d*$/.test(x.id)).slice(0,50);
+    let refreshedAt=0, loadingCard=null, cachedCard=null, cardTimer=0;
+    function publishCard(current,card) {
+      if(current!==feed || !current.isConnected)return;
+      lastContacts=card.contacts;
+      current.contentWindow.postMessage({type:"bechat:contacts",...card},new URL(current.src).origin);
     }
-    function requestPhotos(force=false) {
-      if (!feed?.isConnected) return;
-      const contacts=contactsOnCard(), key=JSON.stringify(contacts);
-      if (!force && key===contactSignature) return;
-      lastContacts=contacts;
-      contactSignature=key;
-      feed.contentWindow.postMessage({type:"bechat:contacts",contacts},new URL(feed.src).origin);
+    async function requestPhotos(force=false) {
+      const current=feed;
+      if(!current?.isConnected)return;
+      if(force && cachedCard)publishCard(current,cachedCard);
+      if(loadingCard===current || Date.now()-refreshedAt<20000)return;
+      loadingCard=current;refreshedAt=Date.now();
+      try{
+        const lead=await crmGet("/api/v4/leads/"+current.dataset.lead+"?with=contacts");
+        if(String(lead.id)!==current.dataset.lead || current!==feed)return;
+        const contacts=[],linked=lead._embedded?.contacts||[];
+        if(linked.length>100)return;
+        for(let i=0;i<linked.length;i+=4){
+          const batch=await Promise.all(linked.slice(i,i+4).map(c=>crmGet("/api/v4/contacts/"+Number(c.id))));
+          for(const c of batch){
+            if(!c.id || !batch.length)return;
+            contacts.push({id:String(c.id),...crmIdentifiers(c)});
+          }
+        }
+        if(current!==feed)return;
+        const card={contacts,leadFields:crmIdentifiers(lead)}, key=JSON.stringify(card);
+        if(key!==contactSignature || force){contactSignature=key;cachedCard=card;publishCard(current,card);}
+      }catch{/* Do not replace saved identifiers with a partial card after a network error. */}
+      finally{if(loadingCard===current)loadingCard=null;}
     }
+    function invalidateCard() {clearTimeout(cardTimer);cardTimer=setTimeout(()=>{refreshedAt=0;requestPhotos();},1000);}
     function putPhotos() {
       for (const form of document.querySelectorAll(".js-card-fields form.linked-form[action*='/contacts/']")) {
         const holder=form.querySelector(".linked-form__field-userpic_inner");
@@ -152,10 +193,11 @@ define(["jquery"], function ($) {
         }
       }
       const originFrame=[...frames].find(el=>el.isConnected && el.contentWindow===event.source && event.origin===new URL(el.src).origin);
-      if (originFrame===feed && originFrame && message?.type==="bechat:crm:find" && /^\+[1-9]\d{6,14}$/.test(message.phone||"")) {
-        const source=event.source,dest=event.origin,phone=message.phone;
-        findCrmContact(phone).then(matches=>source.postMessage({type:"bechat:crm:matches",phone,matches},dest))
-          .catch(()=>source.postMessage({type:"bechat:crm:matches",phone,matches:null},dest));
+      if (originFrame===feed && originFrame && message?.type==="bechat:crm:find") {
+        const source=event.source,dest=event.origin,key=message.key||message.phone;
+        if(!/^(?:\+[1-9]\d{6,14}|tg:[a-z][a-z0-9_]{2,31})$/.test(key||""))return;
+        findCrmContact(key).then(matches=>source.postMessage({type:"bechat:crm:matches",key,phone:key.startsWith("+")?key:null,matches},dest))
+          .catch(()=>source.postMessage({type:"bechat:crm:matches",key,phone:key.startsWith("+")?key:null,matches:null},dest));
         return;
       }
       if (originFrame && message?.type==="bechat:sso:active" && String(message.uid)===currentUID()) {
@@ -396,7 +438,7 @@ define(["jquery"], function ($) {
       if (panel && location.pathname!==panelPath) leave();
       if (feed) { requestPhotos(); putPhotos(); if(history.length)scheduleHistory(); }
       if (!parent || feed || !source(true)) return;
-      contactSignature=""; photosById.clear();
+      contactSignature="";refreshedAt=0;cachedCard=null;lastContacts=[];photosById.clear();
       feed = frame(true, true)[0];
       feed.dataset.lead = match[1];
       feed.style.cssText = "display:block;width:100%;height:72px;border:0;margin:8px 0;color-scheme:dark";
@@ -473,6 +515,7 @@ define(["jquery"], function ($) {
       },
       init: function () {
         widgetStyles();dressCaption();
+        $(document).off("change"+ns,".js-card-fields :input").on("change"+ns,".js-card-fields :input",invalidateCard);
         window.addEventListener("message", onIdentity);
         if (location.pathname.startsWith("/leads/detail/")) {
           observer?.disconnect();
@@ -506,7 +549,7 @@ define(["jquery"], function ($) {
         return true;
       },
       destroy: function () {
-        observer?.disconnect();
+        observer?.disconnect();clearTimeout(cardTimer);
         document.querySelectorAll(".bechat-contact-photos").forEach(el=>el.remove());
         resetHistory();
         feed?.remove();
