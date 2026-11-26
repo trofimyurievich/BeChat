@@ -28,7 +28,7 @@ if (dealFeedMode) {
   window.addEventListener("message",e=>{
     if (e.origin===window.BECHAT_CONFIG?.crmOrigin && e.source===parent && e.data?.type==="bechat:crm:matches" && looking && e.data.phone===looking) wake?.(e.data.matches);
   });
-  (async()=>{
+  window.addEventListener("DOMContentLoaded",async()=>{
     const pause=ms=>new Promise(done=>setTimeout(done,ms));
     while(true) {
       if (!token || !editable() || document.hidden) {await pause(2500);continue;}
@@ -46,7 +46,7 @@ if (dealFeedMode) {
       finally {looking=null;wake=null;}
       await pause(750);
     }
-  })();
+  },{once:true});
   document.body.classList.add("deal-feed");
   const panel = document.createElement("section");
   panel.id = "deal-conversations";

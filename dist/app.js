@@ -1105,6 +1105,7 @@ document.addEventListener("input", (e) => {
   if (e.target.id === "threadq") {
     searchTerm = e.target.value;
     $("#thread").innerHTML = threadHtml(c());
+    BeChatVoice.mount();
     const hits = document.querySelectorAll(".hit");
     document.querySelector(".resultsinfo").textContent = searchTerm
       ? "Найдено: " + hits.length

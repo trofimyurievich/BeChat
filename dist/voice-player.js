@@ -5,7 +5,7 @@ const BeChatVoice = (() => {
   const clock=s=>Number.isFinite(s)?Math.floor(s/60).toString().padStart(2,"0")+":"+Math.floor(s%60).toString().padStart(2,"0"):"—:—";
   const fmtSize=n=>n>0?new Intl.NumberFormat("ru-RU",{maximumFractionDigits:1}).format(n/1024)+" КБ":"";
   const isVoice=f=>f.kind==="audio" || ((f.kind==="file"||!f.kind) && /^(?:голосовое|voice(?:[\s_.-]|$))/i.test(f.name||"") && /\.(ogg|oga|opus|m4a|webm)$/i.test(f.name));
-  const waves=new Map(), texts=new Map(), visible=new Set(), loads=new Map();
+  const blobs=new Map(), waves=new Map(), texts=new Map(), visible=new Set(), loads=new Map();
   let audio=null, playingId="", owner="", generation=0, analysing=0, listened=new Set();
   const cardNodes=id=>[...document.querySelectorAll(".voice-player")].filter(el=>el.dataset.voice===id);
   const fileFor=id=>c()?.messages.flatMap(messageFiles).find(f=>f.id===id);
@@ -54,10 +54,14 @@ const BeChatVoice = (() => {
   function stop() {
     if(!audio)return;
     const old=playingId, player=audio;
-    playingId="";audio=null;player.pause();player.removeAttribute("src");player.load();update(old);
+    playingId="";audio=null;player.pause();
+    const url=player.src;
+    player.removeAttribute("src");player.load();
+    if(url.startsWith("blob:"))URL.revokeObjectURL(url);
+    update(old);
   }
   function clear() {
-    ++generation;stop();observer.disconnect();visible.clear();loads.clear();waves.clear();texts.clear();owner="";listened.clear();
+    ++generation;stop();observer.disconnect();visible.clear();loads.clear();blobs.clear();waves.clear();texts.clear();owner="";listened.clear();
   }
   function makePath(pcm){
     const samples=pcm.getChannelData(0), values=[], bars=64;
@@ -77,6 +81,8 @@ const BeChatVoice = (() => {
     waves.set(id,initial);
     const blob=await attachmentBlob(file);
     if(epoch!==generation || blob.size>8*1024*1024)return;
+    blobs.set(id,Promise.resolve(blob));
+    if(blobs.size>4)blobs.delete(blobs.keys().next().value);
     const Ctx=window.OfflineAudioContext||window.webkitOfflineAudioContext;
     if(!Ctx)return;
     const decoder=new Ctx(1,1,16000);
@@ -111,18 +117,28 @@ const BeChatVoice = (() => {
     if(playingId && !fileFor(playingId))stop();
     for(const el of document.querySelectorAll(".voice-player")){paint(el);observer.observe(el);}
   }
-  function playerFor(id) {
+  async function playerFor(id) {
     if(playingId===id && audio)return audio;
     const file=fileFor(id);
     if(!file?.download)throw Error("Откройте запись ещё раз");
+    const epoch=generation, chat=active;
+    let source=blobs.get(id);
+    if(!source){
+      source=attachmentBlob(file).catch(error=>{blobs.delete(id);throw error;});
+      blobs.set(id,source);
+      if(blobs.size>4)blobs.delete(blobs.keys().next().value);
+    }
+    const blob=await source;
+    if(epoch!==generation || chat!==active)return null;
+    if(playingId===id && audio)return audio;
     stop();
-    const player=new Audio(file.download);
+    const player=new Audio(URL.createObjectURL(blob));
     audio=player;playingId=id;
-    player.preload="metadata";
+    player.preload="auto";
     for(const name of ["loadedmetadata","timeupdate","play","pause","ended","durationchange"])player.addEventListener(name,()=>{
       if(audio!==player)return;
       if(name==="timeupdate" && player.currentTime>0.2)remember(id);
-      if(name==="ended"){remember(id);player.currentTime=0;}
+      if(name==="ended")remember(id);
       update(id);
     });
     player.addEventListener("error",()=>{if(audio===player){stop();toast("Не удалось воспроизвести голосовое");}});
@@ -133,7 +149,7 @@ const BeChatVoice = (() => {
     if(!el||!button)return;
     const id=el.dataset.voice;
     if(button.matches(".voice-play")){
-      guarded(async()=>{const player=playerFor(id);if(player.paused)await player.play();else player.pause();});
+      guarded(async()=>{const player=await playerFor(id);if(!player)return;if(player.paused)await player.play();else player.pause();});
     }else if(button.matches(".voice-text")){
       const entry=texts.get(id);
       if(entry){entry.open=!entry.open;update(id);return;}
@@ -149,7 +165,8 @@ const BeChatVoice = (() => {
     if(!e.target.matches(".voice-wave input"))return;
     const el=e.target.closest(".voice-player"), id=el.dataset.voice, ratio=Number(e.target.value)/1000;
     guarded(async()=>{
-      const player=playerFor(id);
+      const player=await playerFor(id);
+      if(!player)return;
       player.seekTo=ratio;
       const seek=()=>{if(Number.isFinite(player.duration)){player.currentTime=player.seekTo*player.duration;update(id);}};
       if(player.readyState)seek();else player.addEventListener("loadedmetadata",seek,{once:true});

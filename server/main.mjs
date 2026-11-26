@@ -650,7 +650,10 @@ async function attachmentSource(f,row,res) {
           target=new URL(dest,target);
         }
         if(!upstream?.ok) {await upstream?.body?.cancel();bad(410,"MAX не предоставил вложение");}
-        return Readable.fromWeb(upstream.body);
+        const source=Readable.fromWeb(upstream.body);
+      const size=Number(upstream.headers.get("content-length"));
+      if(size>0 && !upstream.headers.get("content-encoding"))source.mediaLength=size;
+      return source;
       }
       const bytes = f.bytes
         ? Buffer.from(f.bytes)
@@ -981,7 +984,9 @@ async function route(req, res) {
       if (!f || (!f.chat && f.owner !== u.login)) bad(404, "Файл недоступен");
       const row = f.chat ? visibleChat(f.chat, u) : null;
       const content=await attachmentSource(f,row,res);
+      const length=Buffer.isBuffer(content)?content.length:content.mediaLength;
       res.writeHead(200, {
+        ...(Number.isSafeInteger(length)?{"Content-Length":length}:{}),
         "Content-Type": f.mime || "application/octet-stream",
         "Content-Disposition":
           "attachment; filename*=UTF-8''" + encodeURIComponent(f.name),
