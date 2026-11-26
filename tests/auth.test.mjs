@@ -117,7 +117,7 @@ test("real HTTP server authenticates CRM employees in widget, web and iOS and is
     );
   const exchange = (ticket, verifier, client) =>
     req("/auth/exchange", "POST", { ticket, verifier, client });
-  assert.equal((await ok("/healthz")).version, "1.1.8");
+  assert.equal((await ok("/healthz")).version, (await import("../package.json",{with:{type:"json"}})).default.version);
   assert.equal((await req("/api/state")).status, 401);
   assert.equal((await req("/api/deal-timeline?lead=1")).status,401);
   assert.equal((await req("/api/voice-text/file","POST",{})).status,401);

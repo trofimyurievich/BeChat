@@ -797,7 +797,7 @@ async function route(req, res) {
     return json(res, { service: "BeChat", status: "live" });
   if (path === "/healthz" && method === "GET") {
     if (!one("SELECT 1 AS healthy")?.healthy) bad(503, "База недоступна");
-    return json(res, { service: "BeChat", version: "1.1.8", status: "ok" });
+    return json(res, { service: "BeChat", version: "1.1.9", status: "ok" });
   }
   if (path.startsWith("/api/")) {
     const u = method==="GET" && path.startsWith("/api/files/") && url.searchParams.has("download")
@@ -1225,7 +1225,7 @@ async function route(req, res) {
           crmOrigin: authSettings.crm,
           accountId:authSettings.tenant,
           serviceOrigin: authSettings.origin,
-          version: "1.1.8",
+          version: "1.1.9",
         }) +
         ";",
     );

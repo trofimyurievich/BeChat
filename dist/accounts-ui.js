@@ -250,6 +250,7 @@ document.addEventListener("click", (e) => {
       clearTimeout(pairingTimer);
       return openPersonalAccounts();
     }
+    if (op === "my-polls") return showMyPolls();
     if (op === "account") return openAccount(channel);
     if (op === "disconnect") {
       const a = (await api("accounts")).find((x) => x.channel === channel);

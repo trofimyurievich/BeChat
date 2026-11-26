@@ -622,7 +622,6 @@ async function handle(act) {
     );
     return;
   }
-  if (act === "my-polls") return showMyPolls();
   if (act === "settings") {
     const commonSender = state.sharedSms?.sender;
     modal(
